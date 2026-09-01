@@ -255,6 +255,15 @@
       "robot_dock_state": {
         "name": "Dock State"
       },
+      "robot_back_wash_frequency": {
+        "name": "Back Wash Frequency"
+      },
+      "robot_back_wash_time": {
+        "name": "Back Wash Time"
+      },
+      "robot_back_wash_type": {
+        "name": "Back Wash Type"
+      },
       "dominant_pollutant": {
         "name": "Dominant Pollutant"
       },

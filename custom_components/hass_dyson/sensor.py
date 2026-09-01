@@ -1508,6 +1508,14 @@ async def async_setup_entry(  # noqa: C901
                     device_serial,
                 )
                 entities.append(DysonRobotDockStateSensor(coordinator))
+            # Mop-wash cycle fields — same "only if ever reported" gate.
+            # Docks without a wash cycle never send these.
+            if coordinator.data and "backWashFrequency" in coordinator.data:
+                entities.append(DysonRobotBackWashFrequencySensor(coordinator))
+            if coordinator.data and "backWashTime" in coordinator.data:
+                entities.append(DysonRobotBackWashTimeSensor(coordinator))
+            if coordinator.data and "backWashType" in coordinator.data:
+                entities.append(DysonRobotBackWashTypeSensor(coordinator))
             # Cloud-fetched cleaning history + Dyson's recommended-next-room
             # sensor. Both gated on cloud auth.
             if coordinator.config_entry.data.get("auth_token"):
@@ -3314,6 +3322,128 @@ class DysonRobotDockStateSensor(DysonEntity, SensorEntity):
             )
             self._attr_native_value = None
 
+        super()._handle_coordinator_update()
+
+
+class DysonRobotBackWashFrequencySensor(DysonEntity, SensorEntity):
+    """Mop-wash cycle length (minutes of effective working time) for robot vacuums.
+
+    Attributes:
+        device_class: None (not a duration; the value is a cycle-length
+            setting, not an elapsed time).
+        state_class: SensorStateClass.MEASUREMENT.
+        entity_category: EntityCategory.DIAGNOSTIC.
+
+    Data Source:
+        :attr:`DysonDevice.robot_back_wash_frequency` — see that property's
+        docstring for the "minutes of effective working time, not
+        wall-clock" model confirmed in ``robot-probe/README.md``.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the back-wash frequency sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_back_wash_frequency"
+        self._attr_translation_key = "robot_back_wash_frequency"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:water-sync"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            self._attr_native_value = (
+                device.robot_back_wash_frequency if device else None
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot back-wash frequency sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+        super()._handle_coordinator_update()
+
+
+class DysonRobotBackWashTimeSensor(DysonEntity, SensorEntity):
+    """Raw ``backWashTime`` value for robot vacuums.
+
+    Meaning unconfirmed — observed constant at 15 in both probe captures,
+    a different number from ``backWashFrequency`` (20), so not a
+    duplicate. Exposed as a diagnostic value pending further probe
+    analysis rather than withheld, matching the project's "surface
+    confirmed-present, unconfirmed-meaning fields as raw diagnostics"
+    precedent (e.g. ``cleaningState``, ``fullCleanAction`` still open).
+
+    Data Source:
+        :attr:`DysonDevice.robot_back_wash_time`.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the back-wash time sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_back_wash_time"
+        self._attr_translation_key = "robot_back_wash_time"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:water-sync"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            self._attr_native_value = device.robot_back_wash_time if device else None
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot back-wash time sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+        super()._handle_coordinator_update()
+
+
+class DysonRobotBackWashTypeSensor(DysonEntity, SensorEntity):
+    """Mop-wash cycle trigger type for robot vacuums.
+
+    Attributes:
+        device_class: None (plain string, not ENUM) — only ``"TIME"`` has
+            ever been observed, but ENUM's ``_attr_options`` would need to
+            enumerate every legal value, and the field's name implies other
+            trigger types may exist that haven't been seen.
+
+    Data Source:
+        :attr:`DysonDevice.robot_back_wash_type`.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the back-wash type sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_back_wash_type"
+        self._attr_translation_key = "robot_back_wash_type"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:water-sync"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            self._attr_native_value = device.robot_back_wash_type if device else None
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot back-wash type sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
         super()._handle_coordinator_update()
 
 

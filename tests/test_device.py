@@ -1926,6 +1926,39 @@ class TestDysonDeviceProperties:
         device_with_state._state_data = {"doNotDisturbMode": True}
         assert device_with_state.robot_do_not_disturb is None
 
+    def test_robot_back_wash_frequency_reported(self, device_with_state):
+        device_with_state._state_data = {"backWashFrequency": 20}
+        assert device_with_state.robot_back_wash_frequency == 20
+
+    def test_robot_back_wash_frequency_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_back_wash_frequency is None
+
+    def test_robot_back_wash_frequency_rejects_bool(self, device_with_state):
+        """bool is an int subclass in Python — must not pass as a frequency."""
+        device_with_state._state_data = {"backWashFrequency": True}
+        assert device_with_state.robot_back_wash_frequency is None
+
+    def test_robot_back_wash_time_reported(self, device_with_state):
+        device_with_state._state_data = {"backWashTime": 15}
+        assert device_with_state.robot_back_wash_time == 15
+
+    def test_robot_back_wash_time_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_back_wash_time is None
+
+    def test_robot_back_wash_type_reported(self, device_with_state):
+        device_with_state._state_data = {"backWashType": "TIME"}
+        assert device_with_state.robot_back_wash_type == "TIME"
+
+    def test_robot_back_wash_type_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_back_wash_type is None
+
+    def test_robot_back_wash_type_empty_string(self, device_with_state):
+        device_with_state._state_data = {"backWashType": ""}
+        assert device_with_state.robot_back_wash_type is None
+
 
 class TestDysonDeviceRobotCommands:
     """Test the (unverified) robot STATE-SET write methods."""

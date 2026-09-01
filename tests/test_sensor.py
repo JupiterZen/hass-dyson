@@ -18,6 +18,7 @@ from homeassistant.const import (
     PERCENTAGE,
     UnitOfDensity,
     UnitOfTemperature,
+    UnitOfTime,
 )
 
 from custom_components.hass_dyson.const import DOMAIN
@@ -169,6 +170,85 @@ class TestSensorPlatformSetup:
         entities = mock_add_entities.call_args[0][0]
         sensor_types = [type(entity).__name__ for entity in entities]
         assert "DysonRobotDockStateSensor" not in sensor_types
+
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_creates_back_wash_sensors_when_reported(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        """Back-wash sensors are created once the robot has reported them."""
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {
+            "backWashFrequency": 20,
+            "backWashTime": 15,
+            "backWashType": "TIME",
+        }
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotBackWashFrequencySensor" in sensor_types
+        assert "DysonRobotBackWashTimeSensor" in sensor_types
+        assert "DysonRobotBackWashTypeSensor" in sensor_types
+
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_skips_back_wash_sensors_when_never_reported(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        """A dock without a wash cycle never sends these fields — skip them."""
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {}
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotBackWashFrequencySensor" not in sensor_types
+        assert "DysonRobotBackWashTimeSensor" not in sensor_types
+        assert "DysonRobotBackWashTypeSensor" not in sensor_types
+
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_back_wash_sensors_independently_gated(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        """Each back-wash sensor gates on its own field, not the other two."""
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {"backWashFrequency": 20}
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotBackWashFrequencySensor" in sensor_types
+        assert "DysonRobotBackWashTimeSensor" not in sensor_types
+        assert "DysonRobotBackWashTypeSensor" not in sensor_types
 
 
 class TestDysonPM25Sensor:
@@ -1170,6 +1250,133 @@ class TestDysonRobotDockStateSensor:
         sensor.hass = pure_mock_hass
 
         pure_mock_coordinator.device = None
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+
+class TestDysonRobotBackWashSensors:
+    """Test the back-wash frequency/time/type sensors using pure pytest."""
+
+    def test_frequency_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotBackWashFrequencySensor,
+        )
+
+        pure_mock_coordinator.device_category = ["robot"]
+        sensor = DysonRobotBackWashFrequencySensor(pure_mock_coordinator)
+
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_back_wash_frequency"
+        )
+        assert sensor._attr_translation_key == "robot_back_wash_frequency"
+        assert sensor._attr_state_class == SensorStateClass.MEASUREMENT
+        assert sensor._attr_native_unit_of_measurement == UnitOfTime.MINUTES
+
+    def test_frequency_sensor_update(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotBackWashFrequencySensor,
+        )
+
+        pure_mock_coordinator.device.robot_back_wash_frequency = 20
+        sensor = DysonRobotBackWashFrequencySensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == 20
+
+    def test_frequency_sensor_missing(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotBackWashFrequencySensor,
+        )
+
+        pure_mock_coordinator.device.robot_back_wash_frequency = None
+        sensor = DysonRobotBackWashFrequencySensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+    def test_frequency_sensor_device_unavailable(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotBackWashFrequencySensor,
+        )
+
+        sensor = DysonRobotBackWashFrequencySensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+        pure_mock_coordinator.device = None
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+    def test_time_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import DysonRobotBackWashTimeSensor
+
+        pure_mock_coordinator.device_category = ["robot"]
+        sensor = DysonRobotBackWashTimeSensor(pure_mock_coordinator)
+
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_back_wash_time"
+        )
+        assert sensor._attr_translation_key == "robot_back_wash_time"
+        assert sensor._attr_state_class == SensorStateClass.MEASUREMENT
+
+    def test_time_sensor_update(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import DysonRobotBackWashTimeSensor
+
+        pure_mock_coordinator.device.robot_back_wash_time = 15
+        sensor = DysonRobotBackWashTimeSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == 15
+
+    def test_type_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import DysonRobotBackWashTypeSensor
+
+        pure_mock_coordinator.device_category = ["robot"]
+        sensor = DysonRobotBackWashTypeSensor(pure_mock_coordinator)
+
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_back_wash_type"
+        )
+        assert sensor._attr_translation_key == "robot_back_wash_type"
+        # Deliberately not ENUM — see class docstring.
+        assert sensor.device_class is None
+
+    def test_type_sensor_update(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import DysonRobotBackWashTypeSensor
+
+        pure_mock_coordinator.device.robot_back_wash_type = "TIME"
+        sensor = DysonRobotBackWashTypeSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "TIME"
+
+    def test_type_sensor_missing(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import DysonRobotBackWashTypeSensor
+
+        pure_mock_coordinator.device.robot_back_wash_type = None
+        sensor = DysonRobotBackWashTypeSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
 
         with patch.object(sensor, "async_write_ha_state"):
             sensor._handle_coordinator_update()

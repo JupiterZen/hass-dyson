@@ -3017,6 +3017,46 @@ class DysonDevice:
         return value if isinstance(value, dict) else None
 
     @property
+    def robot_back_wash_frequency(self) -> int | None:
+        """Return the dock's mop-wash cycle length, in minutes, if reported.
+
+        ``backWashFrequency`` (observed constant at 20 across both probe
+        captures) is minutes of *effective working time* between wash
+        cycles — pauses, charging, and dock time don't count — not a
+        wall-clock interval. Confirmed in ``robot-probe/README.md`` ("wasbeurt
+        van 13:45 volgde op een pauze van 49 minuten... en landde alsnog op
+        17,8 min werktijd"). Only ever seen in CURRENT-STATE, never
+        STATE-CHANGE.
+        """
+        value = self._state_data.get("backWashFrequency")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    @property
+    def robot_back_wash_time(self) -> int | None:
+        """Return the raw ``backWashTime`` field, if reported.
+
+        Observed constant at 15 across both probe captures — a different
+        number from :attr:`robot_back_wash_frequency` (20), so not a
+        duplicate, but its meaning is unconfirmed (settings level? a
+        threshold? something else?). Exposed as-is pending further probe
+        analysis. Only ever seen in CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("backWashTime")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    @property
+    def robot_back_wash_type(self) -> str | None:
+        """Return the dock's wash-cycle trigger type, if reported.
+
+        Only ``"TIME"`` has ever been observed (across both probe
+        captures) — the field's name implies other trigger types exist
+        (e.g. soil-based), but none have been seen. Only ever seen in
+        CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("backWashType")
+        return value if isinstance(value, str) and value else None
+
+    @property
     def robot_last_clean_zones(self) -> list[str]:
         """Zones targeted by the current/most recent MQTT-commanded clean.
 
