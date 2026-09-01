@@ -1,14 +1,12 @@
 """Tests for robot vacuum switch entities (child lock, wash-mop-before-clean,
-do-not-disturb).
+do-not-disturb, hot-water self-clean).
 
-These three CURRENT-STATE fields (childLock, washMopBeforeClean,
-doNotDisturbMode) were never seen written by the app in either probe
-capture — only START/PAUSE/RESUME/ABORT/ABORT-DOCK-ACTION/
-MAP-UPLOAD-STATUS/REQUEST-CURRENT-STATE were ever observed outbound. The
-STATE-SET write path on DysonDevice is therefore unverified against a real
-robot; these tests cover the read/gating/entity-shape behavior that *is*
-confirmed, plus that the (unverified) command methods are called with the
-expected shape.
+childLock/washMopBeforeClean's write path is still unverified — neither
+probe capture ever recorded an app-initiated write to them, only to
+doNotDisturbMode/backWashType/hotWaterSwitch/airDryFrequency (see
+device.py docstrings for the 1 sep 2026 verification details). The
+STATE-SET envelope shape carries over from the verified fields, but not
+field-specific confirmation for those two.
 """
 
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -19,6 +17,7 @@ from custom_components.hass_dyson.const import CONF_HOSTNAME
 from custom_components.hass_dyson.switch import (
     DysonRobotChildLockSwitch,
     DysonRobotDoNotDisturbSwitch,
+    DysonRobotHotWaterSwitchSwitch,
     DysonRobotWashMopBeforeCleanSwitch,
     async_setup_entry as switch_setup_entry,
 )
@@ -30,7 +29,7 @@ from custom_components.hass_dyson.switch import (
 
 @pytest.fixture
 def mock_coordinator():
-    """Create a mock coordinator for an RB05 robot with all three fields reported."""
+    """Create a mock coordinator for an RB05 robot with all fields reported."""
     coordinator = Mock()
     coordinator.serial_number = "RB05-EU-TST0000A"
     coordinator.device_name = "Spot+Scrub Ai"
@@ -42,6 +41,7 @@ def mock_coordinator():
         "startTime": "22:00",
         "endTime": "8:00",
     }
+    coordinator.device.robot_hot_water_switch = True
     coordinator.device_capabilities = []
     coordinator.device_category = ["robot"]
     coordinator.config_entry = Mock()
@@ -50,6 +50,7 @@ def mock_coordinator():
         "childLock": False,
         "washMopBeforeClean": True,
         "doNotDisturbMode": {"isOn": False, "startTime": "22:00", "endTime": "8:00"},
+        "hotWaterSwitch": True,
     }
     return coordinator
 
@@ -81,7 +82,7 @@ class TestRobotSwitchCreation:
     """Tests for conditional switch entity creation."""
 
     @pytest.mark.asyncio
-    async def test_all_three_created_when_fields_reported(
+    async def test_all_created_when_fields_reported(
         self, mock_hass, mock_config_entry, mock_coordinator
     ):
         mock_add = MagicMock()
@@ -90,6 +91,7 @@ class TestRobotSwitchCreation:
         assert any(isinstance(e, DysonRobotChildLockSwitch) for e in entities)
         assert any(isinstance(e, DysonRobotWashMopBeforeCleanSwitch) for e in entities)
         assert any(isinstance(e, DysonRobotDoNotDisturbSwitch) for e in entities)
+        assert any(isinstance(e, DysonRobotHotWaterSwitchSwitch) for e in entities)
 
     @pytest.mark.asyncio
     async def test_none_created_for_non_robot_category(
@@ -105,6 +107,17 @@ class TestRobotSwitchCreation:
             isinstance(e, DysonRobotWashMopBeforeCleanSwitch) for e in entities
         )
         assert not any(isinstance(e, DysonRobotDoNotDisturbSwitch) for e in entities)
+        assert not any(isinstance(e, DysonRobotHotWaterSwitchSwitch) for e in entities)
+
+    @pytest.mark.asyncio
+    async def test_hot_water_switch_not_created_when_absent(
+        self, mock_hass, mock_config_entry, mock_coordinator
+    ):
+        del mock_coordinator.data["hotWaterSwitch"]
+        mock_add = MagicMock()
+        await switch_setup_entry(mock_hass, mock_config_entry, mock_add)
+        entities = mock_add.call_args[0][0]
+        assert not any(isinstance(e, DysonRobotHotWaterSwitchSwitch) for e in entities)
 
     @pytest.mark.asyncio
     async def test_child_lock_not_created_when_absent(
@@ -156,6 +169,7 @@ class TestRobotSwitchCreation:
             isinstance(e, DysonRobotWashMopBeforeCleanSwitch) for e in entities
         )
         assert not any(isinstance(e, DysonRobotDoNotDisturbSwitch) for e in entities)
+        assert not any(isinstance(e, DysonRobotHotWaterSwitchSwitch) for e in entities)
 
 
 # ---------------------------------------------------------------------------
@@ -342,4 +356,59 @@ class TestRobotDoNotDisturbSwitch:
     async def test_no_command_when_device_none(self, mock_coordinator):
         mock_coordinator.device = None
         entity = DysonRobotDoNotDisturbSwitch(mock_coordinator)
+        await entity.async_turn_on()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Hot-water self-clean switch
+# ---------------------------------------------------------------------------
+
+
+class TestRobotHotWaterSwitchSwitch:
+    def test_unique_id(self, mock_coordinator):
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        assert entity._attr_unique_id == "RB05-EU-TST0000A_robot_hot_water_switch"
+
+    def test_translation_key(self, mock_coordinator):
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        assert entity._attr_translation_key == "robot_hot_water_switch"
+
+    def test_is_on_reflects_device_state(self, mock_coordinator):
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        assert entity._attr_is_on is True
+
+    def test_handle_update_reflects_new_state(self, mock_coordinator):
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        entity.async_write_ha_state = MagicMock()
+        mock_coordinator.device.robot_hot_water_switch = False
+        entity._handle_coordinator_update()
+        assert entity._attr_is_on is False
+
+    def test_is_none_when_no_device(self, mock_coordinator):
+        mock_coordinator.device = None
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        assert entity._attr_is_on is None
+
+    @pytest.mark.asyncio
+    async def test_turn_on_calls_set_hot_water_switch_true(self, mock_coordinator):
+        mock_coordinator.device.set_robot_hot_water_switch = AsyncMock()
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        await entity.async_turn_on()
+        mock_coordinator.device.set_robot_hot_water_switch.assert_awaited_once_with(
+            True
+        )
+
+    @pytest.mark.asyncio
+    async def test_turn_off_calls_set_hot_water_switch_false(self, mock_coordinator):
+        mock_coordinator.device.set_robot_hot_water_switch = AsyncMock()
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        await entity.async_turn_off()
+        mock_coordinator.device.set_robot_hot_water_switch.assert_awaited_once_with(
+            False
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_command_when_device_none(self, mock_coordinator):
+        mock_coordinator.device = None
+        entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
         await entity.async_turn_on()  # should not raise

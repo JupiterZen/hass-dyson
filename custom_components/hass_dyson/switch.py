@@ -91,6 +91,8 @@ async def async_setup_entry(
             entities.append(DysonRobotWashMopBeforeCleanSwitch(coordinator))
         if "doNotDisturbMode" in coordinator.data:
             entities.append(DysonRobotDoNotDisturbSwitch(coordinator))
+        if "hotWaterSwitch" in coordinator.data:
+            entities.append(DysonRobotHotWaterSwitchSwitch(coordinator))
 
     async_add_entities(entities, True)
     return True
@@ -934,6 +936,81 @@ class DysonRobotDoNotDisturbSwitch(DysonEntity, SwitchEntity):
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error disabling do-not-disturb for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonRobotHotWaterSwitchSwitch(DysonEntity, SwitchEntity):
+    """Switch for the dock's "Zelfreinigend met heet water" (hot-water self-clean) toggle.
+
+    VERIFIED write path (1 sep 2026 probe) — see
+    :meth:`DysonDevice.set_robot_hot_water_switch`.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the hot-water self-clean switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_hot_water_switch"
+        self._attr_translation_key = "robot_hot_water_switch"
+        self._attr_icon = "mdi:water-thermometer"
+        self._attr_is_on = (
+            coordinator.device.robot_hot_water_switch if coordinator.device else None
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_is_on = (
+            self.coordinator.device.robot_hot_water_switch
+            if self.coordinator.device
+            else None
+        )
+        super()._handle_coordinator_update()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable hot-water self-clean."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_hot_water_switch(True)
+            _LOGGER.debug(
+                "Enabled hot-water self-clean for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error enabling hot-water self-clean for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error enabling hot-water self-clean for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable hot-water self-clean."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_hot_water_switch(False)
+            _LOGGER.debug(
+                "Disabled hot-water self-clean for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error disabling hot-water self-clean for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error disabling hot-water self-clean for %s: %s",
                 self.coordinator.serial_number,
                 err,
             )

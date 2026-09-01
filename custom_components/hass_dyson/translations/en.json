@@ -320,6 +320,9 @@
       "robot_do_not_disturb": {
         "name": "Do Not Disturb"
       },
+      "robot_hot_water_switch": {
+        "name": "Hot Water Self-Clean"
+      },
       "daylight_mode": {
         "name": "Daylight Mode"
       }
@@ -362,6 +365,9 @@
       },
       "robot_power_generic": {
         "name": "Power Level"
+      },
+      "robot_self_clean_interval": {
+        "name": "Self-Clean Interval"
       }
     },
     "number": {
@@ -379,6 +385,9 @@
       },
       "oscillation_angle_span": {
         "name": "Oscillation Angle"
+      },
+      "robot_air_dry_frequency": {
+        "name": "Mop Air-Dry Duration"
       }
     },
     "binary_sensor": {

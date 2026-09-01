@@ -16,8 +16,10 @@ from .const import (
     ROBOT_POWER_OPTIONS_360_EYE,
     ROBOT_POWER_OPTIONS_HEURIST,
     ROBOT_POWER_OPTIONS_VIS_NAV,
+    ROBOT_SELF_CLEAN_INTERVAL_OPTIONS,
 )
 from .coordinator import DysonDataUpdateCoordinator
+from .device_utils import mask_serial
 from .entity import DysonEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,6 +76,12 @@ async def async_setup_entry(
                 coordinator.serial_number,
             )
             entities.append(DysonRobotPowerGenericSelect(coordinator))
+
+        # Self-clean interval — only for docks that have reported
+        # backWashType at least once (matching the switch/sensor gates
+        # elsewhere in this integration for the same field family).
+        if coordinator.data and "backWashType" in coordinator.data:
+            entities.append(DysonRobotSelfCleanIntervalSelect(coordinator))
 
     # Add tilt oscillation select for ec devices that report the oton key in state.
     # These devices (e.g. BP04) have no dedicated capability flag; presence of oton
@@ -1264,6 +1272,74 @@ class DysonRobotPowerGenericSelect(DysonEntity, SelectEntity):
         except Exception as err:
             _LOGGER.error(
                 "Error setting generic robot power to '%s' for %s: %s",
+                option,
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonRobotSelfCleanIntervalSelect(DysonEntity, SelectEntity):
+    """Select entity for the dock's "Zelfreinigingsinterval" (self-clean interval).
+
+    Mirrors the MyDyson app's own setting exactly: same four option labels,
+    same underlying (backWashType, backWashTime) pairs — see
+    :data:`ROBOT_SELF_CLEAN_INTERVAL_OPTIONS`. Built as one select rather
+    than two separate backWashType/backWashTime entities because the app
+    itself presents this as a single setting, and the two fields are
+    always written together in one STATE-SET command (verified 1 sep 2026
+    probe capture).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the self-clean interval select."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_self_clean_interval"
+        self._attr_translation_key = "robot_self_clean_interval"
+        self._attr_icon = "mdi:water-sync"
+        self._attr_options = list(ROBOT_SELF_CLEAN_INTERVAL_OPTIONS.keys())
+        self._attr_current_option = (
+            coordinator.device.robot_self_clean_interval if coordinator.device else None
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_current_option = (
+            self.coordinator.device.robot_self_clean_interval
+            if self.coordinator.device
+            else None
+        )
+        super()._handle_coordinator_update()
+
+    async def async_select_option(self, option: str) -> None:
+        """Change the self-clean interval."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_self_clean_interval(option)
+            _LOGGER.debug(
+                "Set self-clean interval to '%s' for %s",
+                option,
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error setting self-clean interval to '%s' for %s: %s",
+                option,
+                self.coordinator.serial_number,
+                err,
+            )
+        except ValueError as err:
+            _LOGGER.error(
+                "Invalid self-clean interval option '%s' for %s: %s",
+                option,
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error setting self-clean interval to '%s' for %s: %s",
                 option,
                 self.coordinator.serial_number,
                 err,

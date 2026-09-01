@@ -11,8 +11,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DEVICE_CATEGORY_ROBOT, DOMAIN
 from .coordinator import DysonDataUpdateCoordinator
+from .device_utils import mask_serial
 from .entity import DysonEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -54,6 +55,17 @@ async def async_setup_entry(
             "Day0 device detected for %s - using preset-only oscillation control",
             coordinator.serial_number,
         )
+
+    # Robot vacuum mop air-dry duration — only for docks that have
+    # reported airDryFrequency at least once (matching the gate used for
+    # the other robot dock fields elsewhere in this integration).
+    device_categories = coordinator.device_category or []
+    if (
+        any(cat == DEVICE_CATEGORY_ROBOT for cat in device_categories)
+        and coordinator.data
+        and "airDryFrequency" in coordinator.data
+    ):
+        entities.append(DysonRobotAirDryFrequencyNumber(coordinator))
 
     async_add_entities(entities, True)
 
@@ -342,6 +354,80 @@ class DysonSleepTimerNumber(DysonEntity, NumberEntity):
         attributes["sleep_timer_enabled"] = sltm != "OFF"
 
         return attributes
+
+
+class DysonRobotAirDryFrequencyNumber(DysonEntity, NumberEntity):
+    """Number entity for the dock's "Droogtijd met roterende dweilborstel"
+    (mop air-dry duration, in hours) setting.
+
+    Field name (``airDryFrequency``) is misleading — this is a duration in
+    hours, not a frequency (confirmed against the app's own UI, which
+    shows e.g. "3 uur"). Write path VERIFIED 1 sep 2026 probe capture —
+    see :meth:`DysonDevice.set_robot_air_dry_frequency`.
+
+    Bounds: only 3/4/5 were observed during the probe session (the app's
+    slider wasn't dragged to its extremes), so min/max here (1-8) are a
+    conservative guess with margin, not a confirmed hardware limit.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the air-dry duration number."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_air_dry_frequency"
+        self._attr_translation_key = "robot_air_dry_frequency"
+        self._attr_icon = "mdi:hair-dryer"
+        self._attr_mode = NumberMode.BOX
+        self._attr_native_min_value = 1
+        self._attr_native_max_value = 8
+        self._attr_native_step = 1
+        self._attr_native_unit_of_measurement = "h"
+        self._attr_native_value = (
+            coordinator.device.robot_air_dry_frequency if coordinator.device else None
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_native_value = (
+            self.coordinator.device.robot_air_dry_frequency
+            if self.coordinator.device
+            else None
+        )
+        super()._handle_coordinator_update()
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the air-dry duration, in hours."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_air_dry_frequency(int(value))
+            _LOGGER.debug(
+                "Set air-dry duration to %s hours for %s",
+                int(value),
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error setting air-dry duration to %s for %s: %s",
+                value,
+                self.coordinator.serial_number,
+                err,
+            )
+        except (ValueError, TypeError) as err:
+            _LOGGER.warning(
+                "Invalid air-dry duration value %s for %s: %s",
+                value,
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error setting air-dry duration to %s for %s: %s",
+                value,
+                self.coordinator.serial_number,
+                err,
+            )
 
 
 class DysonOscillationLowerAngleNumber(DysonEntity, NumberEntity):

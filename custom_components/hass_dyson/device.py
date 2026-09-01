@@ -53,6 +53,7 @@ from .const import (
     LEGACY_FILTER_LIFE_MAX_HOURS,
     MQTT_CMD_REQUEST_ENVIRONMENT,
     ROBOT_FAULT_SUBSYSTEMS,
+    ROBOT_SELF_CLEAN_INTERVAL_OPTIONS,
     STATE_KEY_LEGACY_FILTER_LIFE,
     celsius_to_decikelvin,
 )
@@ -3026,20 +3027,27 @@ class DysonDevice:
         wall-clock interval. Confirmed in ``robot-probe/README.md`` ("wasbeurt
         van 13:45 volgde op een pauze van 49 minuten... en landde alsnog op
         17,8 min werktijd"). Only ever seen in CURRENT-STATE, never
-        STATE-CHANGE.
+        STATE-CHANGE. Distinct from :attr:`robot_back_wash_time` — this is
+        an observed-constant duration model, that one is a discrete app
+        setting; the two probe captures happened to overlap in name only.
         """
         value = self._state_data.get("backWashFrequency")
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
     @property
     def robot_back_wash_time(self) -> int | None:
-        """Return the raw ``backWashTime`` field, if reported.
+        """Return the self-clean interval in minutes, if type is TIME.
 
-        Observed constant at 15 across both probe captures — a different
-        number from :attr:`robot_back_wash_frequency` (20), so not a
-        duplicate, but its meaning is unconfirmed (settings level? a
-        threshold? something else?). Exposed as-is pending further probe
-        analysis. Only ever seen in CURRENT-STATE, never STATE-CHANGE.
+        VERIFIED 1 sep 2026 (run-6-probe.log): this is the "Zelfreinigings-
+        interval" (self-clean interval) app setting's minute value — one of
+        15/30/60, confirmed by cycling through the app's own dropdown
+        (screenshot: "Elke 15 min" / "Elke 30 min" / "Alleen indien nodig")
+        while a probe capture ran, and the robot's next CURRENT-STATE
+        reflected each new value immediately. 60 corresponds to the app's
+        "Alleen indien nodig" (only when needed) option. Meaningless when
+        :attr:`robot_back_wash_type` is ``"ROOM"`` — see
+        :attr:`robot_self_clean_interval` for the combined, app-equivalent
+        reading. Only ever seen in CURRENT-STATE, never STATE-CHANGE.
         """
         value = self._state_data.get("backWashTime")
         return value if isinstance(value, int) and not isinstance(value, bool) else None
@@ -3048,13 +3056,72 @@ class DysonDevice:
     def robot_back_wash_type(self) -> str | None:
         """Return the dock's wash-cycle trigger type, if reported.
 
-        Only ``"TIME"`` has ever been observed (across both probe
-        captures) — the field's name implies other trigger types exist
-        (e.g. soil-based), but none have been seen. Only ever seen in
-        CURRENT-STATE, never STATE-CHANGE.
+        VERIFIED 1 sep 2026 (run-6-probe.log): exactly two values exist,
+        ``"TIME"`` and ``"ROOM"`` — confirmed by cycling through every
+        option in the app's "Zelfreinigingsinterval" setting during a
+        probe capture; no third value was ever sent. ``"ROOM"`` is the
+        app's "Na elke kamer" (after every room) option. See
+        :attr:`robot_self_clean_interval` for the combined, app-equivalent
+        reading. Only ever seen in CURRENT-STATE, never STATE-CHANGE.
         """
         value = self._state_data.get("backWashType")
         return value if isinstance(value, str) and value else None
+
+    @property
+    def robot_self_clean_interval(self) -> str | None:
+        """Return the app-equivalent "Zelfreinigingsinterval" label, if derivable.
+
+        Combines :attr:`robot_back_wash_type` and :attr:`robot_back_wash_time`
+        into the single label the MyDyson app shows as one setting (see
+        :data:`ROBOT_SELF_CLEAN_INTERVAL_OPTIONS`). Returns None if the
+        current (type, time) pair doesn't match any known app option —
+        e.g. type not yet reported, or a combination never observed
+        (which would mean the app has more options than the four
+        confirmed on 1 sep 2026).
+        """
+        wash_type = self.robot_back_wash_type
+        if wash_type is None:
+            return None
+        wash_time = self.robot_back_wash_time
+        for label, combo in ROBOT_SELF_CLEAN_INTERVAL_OPTIONS.items():
+            if combo.get("backWashType") != wash_type:
+                continue
+            if "backWashTime" not in combo:
+                return label
+            if combo["backWashTime"] == wash_time:
+                return label
+        return None
+
+    @property
+    def robot_hot_water_switch(self) -> bool | None:
+        """Return whether the dock's hot-water self-clean is enabled, if reported.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): app's "Zelfreinigend met
+        heet water" (self-cleaning with hot water) toggle — confirmed by
+        toggling it on/off during a probe capture
+        (``{"msg":"STATE-SET","hotWaterSwitch":true/false,...}``), robot's
+        next CURRENT-STATE reflected each change immediately. Plain
+        top-level boolean, only ever seen in CURRENT-STATE, never
+        STATE-CHANGE.
+        """
+        value = self._state_data.get("hotWaterSwitch")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def robot_air_dry_frequency(self) -> int | None:
+        """Return the mop air-dry duration, in hours, if reported.
+
+        ``airDryFrequency`` is the app's "Droogtijd met roterende
+        dweilborstel" (dry time with rotating mop brush) setting — the
+        field name is misleading (not a frequency). Unit confirmed as
+        hours by the user against the app's own UI (screenshot: "3 uur").
+        Write path VERIFIED 1 sep 2026 (run-6-probe.log): values 3/4/5
+        were sent via STATE-SET while the app setting was changed, robot's
+        next CURRENT-STATE reflected each change immediately. Only ever
+        seen in CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("airDryFrequency")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
 
     @property
     def robot_last_clean_zones(self) -> list[str]:
@@ -3957,6 +4024,75 @@ class DysonDevice:
             {
                 "msg": "STATE-SET",
                 "doNotDisturbMode": payload,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_self_clean_interval(self, option: str) -> None:
+        """Set the "Zelfreinigingsinterval" (self-clean interval) app setting.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): the app always sends both
+        ``backWashType`` and ``backWashTime`` together in one STATE-SET,
+        even when only the interval (not the type) changes — e.g.
+        ``{"time":"...","msg":"STATE-SET","mode-reason":"RAPP",
+        "backWashType":"TIME","backWashTime":60}``. ``option`` must be one
+        of :data:`ROBOT_SELF_CLEAN_INTERVAL_OPTIONS`'s keys (the same four
+        labels the MyDyson app shows).
+
+        Raises:
+            ValueError: If ``option`` isn't a known self-clean interval label.
+        """
+        combo = ROBOT_SELF_CLEAN_INTERVAL_OPTIONS.get(option)
+        if combo is None:
+            raise ValueError(f"Unknown self-clean interval option: {option!r}")
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "backWashType": combo["backWashType"],
+                # ROOM's combo omits backWashTime — fall back to the
+                # last-known value so the robot always gets a paired
+                # backWashType/backWashTime write, matching the app.
+                "backWashTime": combo.get(
+                    "backWashTime", self.robot_back_wash_time or 60
+                ),
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_hot_water_switch(self, enabled: bool) -> None:
+        """Set the dock's "Zelfreinigend met heet water" (hot-water self-clean) toggle.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): the app sent
+        ``{"mode-reason":"RAPP","time":"...","hotWaterSwitch":true/false,
+        "msg":"STATE-SET"}`` and the robot's next CURRENT-STATE reflected
+        the change immediately.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "hotWaterSwitch": enabled,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_air_dry_frequency(self, hours: int) -> None:
+        """Set the "Droogtijd met roterende dweilborstel" (mop air-dry duration), in hours.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): the app sent
+        ``{"msg":"STATE-SET","airDryFrequency":<hours>,"mode-reason":"RAPP",
+        "time":"..."}`` for values 3/4/5 while changing the app's own
+        "Droogtijd" setting, robot's next CURRENT-STATE reflected each
+        change immediately. Field name is misleading — this is a duration
+        in hours, not a frequency (confirmed against the app's UI, which
+        shows e.g. "3 uur").
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "airDryFrequency": hours,
                 "time": self._get_command_timestamp(),
                 "mode-reason": "RAPP",
             }

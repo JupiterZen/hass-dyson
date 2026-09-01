@@ -594,6 +594,19 @@ ROBOT_POWER_OPTIONS_VIS_NAV: Final = {
     ROBOT_POWER_VIS_NAV_BOOST: "Boost Mode",
 }
 
+#: App-facing "Zelfreinigingsinterval" (self-clean interval) options, each
+#: mapping to a (backWashType, backWashTime) pair. Confirmed 1 sep 2026 by
+#: cycling through all four options in the MyDyson app while a probe
+#: capture ran (run-6-probe.log) and matching the screenshot of the
+#: setting's own UI. backWashTime is omitted from the ROOM entry — no such
+#: value was ever sent by the app for ROOM.
+ROBOT_SELF_CLEAN_INTERVAL_OPTIONS: Final[dict[str, dict[str, str | int]]] = {
+    "Na elke kamer": {"backWashType": "ROOM"},
+    "Elke 15 min": {"backWashType": "TIME", "backWashTime": 15},
+    "Elke 30 min": {"backWashType": "TIME", "backWashTime": 30},
+    "Alleen indien nodig": {"backWashType": "TIME", "backWashTime": 60},
+}
+
 ROBOT_STATE_TO_HA_STATE: Final = {
     # Active cleaning states
     ROBOT_STATE_FULL_CLEAN_RUNNING: VacuumActivity.CLEANING,

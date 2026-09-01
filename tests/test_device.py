@@ -1959,6 +1959,47 @@ class TestDysonDeviceProperties:
         device_with_state._state_data = {"backWashType": ""}
         assert device_with_state.robot_back_wash_type is None
 
+    def test_robot_self_clean_interval_room(self, device_with_state):
+        device_with_state._state_data = {"backWashType": "ROOM", "backWashTime": 60}
+        assert device_with_state.robot_self_clean_interval == "Na elke kamer"
+
+    def test_robot_self_clean_interval_time_15(self, device_with_state):
+        device_with_state._state_data = {"backWashType": "TIME", "backWashTime": 15}
+        assert device_with_state.robot_self_clean_interval == "Elke 15 min"
+
+    def test_robot_self_clean_interval_time_30(self, device_with_state):
+        device_with_state._state_data = {"backWashType": "TIME", "backWashTime": 30}
+        assert device_with_state.robot_self_clean_interval == "Elke 30 min"
+
+    def test_robot_self_clean_interval_time_60(self, device_with_state):
+        device_with_state._state_data = {"backWashType": "TIME", "backWashTime": 60}
+        assert device_with_state.robot_self_clean_interval == "Alleen indien nodig"
+
+    def test_robot_self_clean_interval_unknown_type(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_self_clean_interval is None
+
+    def test_robot_self_clean_interval_unrecognized_time(self, device_with_state):
+        """A TIME/backWashTime combo outside the known four returns None."""
+        device_with_state._state_data = {"backWashType": "TIME", "backWashTime": 45}
+        assert device_with_state.robot_self_clean_interval is None
+
+    def test_robot_hot_water_switch_reported(self, device_with_state):
+        device_with_state._state_data = {"hotWaterSwitch": True}
+        assert device_with_state.robot_hot_water_switch is True
+
+    def test_robot_hot_water_switch_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_hot_water_switch is None
+
+    def test_robot_air_dry_frequency_reported(self, device_with_state):
+        device_with_state._state_data = {"airDryFrequency": 4}
+        assert device_with_state.robot_air_dry_frequency == 4
+
+    def test_robot_air_dry_frequency_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_air_dry_frequency is None
+
 
 class TestDysonDeviceRobotCommands:
     """Test the robot STATE-SET write methods.
@@ -2047,6 +2088,66 @@ class TestDysonDeviceRobotCommands:
             "startTime": "22:00",
             "endTime": "8:00",
         }
+
+    @pytest.mark.asyncio
+    async def test_set_robot_self_clean_interval_room(self, device_with_state):
+        await device_with_state.set_robot_self_clean_interval("Na elke kamer")
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["backWashType"] == "ROOM"
+        assert sent["mode-reason"] == "RAPP"
+        # Confirmed 1 sep 2026: app always sends both fields together, even
+        # for ROOM where backWashTime has no meaning to the app.
+        assert "backWashTime" in sent
+
+    @pytest.mark.asyncio
+    async def test_set_robot_self_clean_interval_every_15_min(self, device_with_state):
+        await device_with_state.set_robot_self_clean_interval("Elke 15 min")
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["backWashType"] == "TIME"
+        assert sent["backWashTime"] == 15
+
+    @pytest.mark.asyncio
+    async def test_set_robot_self_clean_interval_only_when_needed(
+        self, device_with_state
+    ):
+        await device_with_state.set_robot_self_clean_interval("Alleen indien nodig")
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["backWashType"] == "TIME"
+        assert sent["backWashTime"] == 60
+
+    @pytest.mark.asyncio
+    async def test_set_robot_self_clean_interval_room_uses_last_known_time(
+        self, device_with_state
+    ):
+        """ROOM's combo omits backWashTime — falls back to last-known value."""
+        device_with_state._state_data = {"backWashTime": 30}
+        await device_with_state.set_robot_self_clean_interval("Na elke kamer")
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["backWashTime"] == 30
+
+    @pytest.mark.asyncio
+    async def test_set_robot_self_clean_interval_unknown_option_raises(
+        self, device_with_state
+    ):
+        with pytest.raises(ValueError, match="Unknown self-clean interval option"):
+            await device_with_state.set_robot_self_clean_interval("Elke 5 min")
+
+    @pytest.mark.asyncio
+    async def test_set_robot_hot_water_switch_true(self, device_with_state):
+        await device_with_state.set_robot_hot_water_switch(True)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["hotWaterSwitch"] is True
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_set_robot_air_dry_frequency(self, device_with_state):
+        await device_with_state.set_robot_air_dry_frequency(5)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["airDryFrequency"] == 5
+        assert sent["mode-reason"] == "RAPP"
 
 
 class TestDysonDeviceMQTTCallbacks:
