@@ -2968,6 +2968,22 @@ class DysonDevice:
         return value if isinstance(value, list) else None
 
     @property
+    def robot_dock_state(self) -> str | None:
+        """Return the dock's own activity, if reported.
+
+        ``dockState`` (``IDLE`` / ``WASHING_MOP`` / ``COLLECTING_DUST`` /
+        ``DRYING_MOP``) is distinct from the robot's own ``state`` — a wash
+        cycle can run mid-clean while ``state`` still reads
+        ``FULL_CLEAN_RUNNING``. Only ever seen in CURRENT-STATE across two
+        independent probe captures, never STATE-CHANGE, so — like
+        :attr:`robot_state` — this is stale between the robot's periodic
+        CURRENT-STATE heartbeats and unknown until the first one after a
+        restart.
+        """
+        value = self._state_data.get("dockState")
+        return value if isinstance(value, str) and value else None
+
+    @property
     def robot_last_clean_zones(self) -> list[str]:
         """Zones targeted by the current/most recent MQTT-commanded clean.
 

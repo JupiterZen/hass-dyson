@@ -124,6 +124,52 @@ class TestSensorPlatformSetup:
         sensor_types = [type(entity).__name__ for entity in entities]
         assert "DysonRobotBatterySensor" in sensor_types
 
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_creates_dock_state_sensor_when_reported(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        """Dock state sensor is created once the robot has reported dockState."""
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {"dockState": "IDLE"}
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotDockStateSensor" in sensor_types
+
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_skips_dock_state_sensor_when_never_reported(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        """Robots on a plain charging dock never send dockState — skip the sensor."""
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {}
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotDockStateSensor" not in sensor_types
+
 
 class TestDysonPM25Sensor:
     """Test DysonPM25Sensor using pure pytest."""
@@ -1037,6 +1083,98 @@ class TestDysonRobotBatterySensor:
                 sensor._handle_coordinator_update()
 
             assert sensor._attr_native_value == level
+
+
+class TestDysonRobotDockStateSensor:
+    """Test DysonRobotDockStateSensor using pure pytest."""
+
+    def test_dock_state_sensor_init(self, pure_mock_coordinator):
+        """Test dock state sensor initialization."""
+        from custom_components.hass_dyson.sensor import DysonRobotDockStateSensor
+
+        pure_mock_coordinator.device_category = ["robot"]
+
+        sensor = DysonRobotDockStateSensor(pure_mock_coordinator)
+
+        assert sensor.coordinator == pure_mock_coordinator
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_dock_state"
+        )
+        assert sensor._attr_device_class == SensorDeviceClass.ENUM
+        assert sensor._attr_options == [
+            "IDLE",
+            "WASHING_MOP",
+            "COLLECTING_DUST",
+            "DRYING_MOP",
+        ]
+
+    def test_dock_state_sensor_update(self, pure_mock_coordinator, pure_mock_hass):
+        """Test dock state sensor picks up a known value."""
+        from custom_components.hass_dyson.sensor import DysonRobotDockStateSensor
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_dock_state = "WASHING_MOP"
+
+        sensor = DysonRobotDockStateSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "WASHING_MOP"
+
+    def test_dock_state_sensor_missing_data(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        """Test dock state sensor when the device hasn't reported yet."""
+        from custom_components.hass_dyson.sensor import DysonRobotDockStateSensor
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_dock_state = None
+
+        sensor = DysonRobotDockStateSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+    def test_dock_state_sensor_unknown_value_rejected(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        """An unrecognized dockState (future firmware) must not violate ENUM options."""
+        from custom_components.hass_dyson.sensor import DysonRobotDockStateSensor
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_dock_state = "SOME_NEW_VALUE"
+
+        sensor = DysonRobotDockStateSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+    def test_dock_state_sensor_device_unavailable(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        """Test dock state sensor when device is unavailable."""
+        from custom_components.hass_dyson.sensor import DysonRobotDockStateSensor
+
+        pure_mock_coordinator.device_category = ["robot"]
+
+        sensor = DysonRobotDockStateSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        pure_mock_coordinator.device = None
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
 
 
 if __name__ == "__main__":

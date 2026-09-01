@@ -1872,6 +1872,30 @@ class TestDysonDeviceProperties:
 
         assert result is False
 
+    def test_robot_dock_state_reported(self, device_with_state):
+        """robot_dock_state reads the top-level dockState CURRENT-STATE field."""
+        device_with_state._state_data = {"dockState": "WASHING_MOP"}
+
+        assert device_with_state.robot_dock_state == "WASHING_MOP"
+
+    def test_robot_dock_state_missing(self, device_with_state):
+        """robot_dock_state is None before the robot has ever reported it."""
+        device_with_state._state_data = {}
+
+        assert device_with_state.robot_dock_state is None
+
+    def test_robot_dock_state_empty_string(self, device_with_state):
+        """An empty dockState string is treated as not-reported, not a value."""
+        device_with_state._state_data = {"dockState": ""}
+
+        assert device_with_state.robot_dock_state is None
+
+    def test_robot_dock_state_wrong_type(self, device_with_state):
+        """A non-string dockState (malformed payload) is treated as not-reported."""
+        device_with_state._state_data = {"dockState": 123}
+
+        assert device_with_state.robot_dock_state is None
+
 
 class TestDysonDeviceMQTTCallbacks:
     """Test MQTT connection and callback functionality."""

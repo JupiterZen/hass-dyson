@@ -1498,6 +1498,16 @@ async def async_setup_entry(  # noqa: C901
                 device_serial,
             )
             entities.append(DysonRobotBatterySensor(coordinator))
+            # Wash/dry dock status — only docks that support it ever send
+            # dockState, so gate on having seen the key at least once
+            # rather than creating a permanently-unknown entity for
+            # robots on a plain charging dock.
+            if coordinator.data and "dockState" in coordinator.data:
+                _LOGGER.debug(
+                    "Adding dock state sensor for robot device %s",
+                    device_serial,
+                )
+                entities.append(DysonRobotDockStateSensor(coordinator))
             # Cloud-fetched cleaning history + Dyson's recommended-next-room
             # sensor. Both gated on cloud auth.
             if coordinator.config_entry.data.get("auth_token"):
@@ -3224,6 +3234,81 @@ class DysonRobotBatterySensor(DysonEntity, SensorEntity):
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error updating robot battery sensor for device %s: %s",
+                device_serial,
+                err,
+            )
+            self._attr_native_value = None
+
+        super()._handle_coordinator_update()
+
+
+class DysonRobotDockStateSensor(DysonEntity, SensorEntity):
+    """Dock activity sensor for Dyson robot vacuums with a wash/dry dock.
+
+    Reports the dock's own state (``IDLE`` / ``WASHING_MOP`` /
+    ``COLLECTING_DUST`` / ``DRYING_MOP``) — distinct from the robot's own
+    ``state``, which can still read ``FULL_CLEAN_RUNNING`` while a
+    mid-clean wash cycle runs on the dock.
+
+    Attributes:
+        device_class: SensorDeviceClass.ENUM, restricted to the four known
+            dockState values.
+        entity_category: EntityCategory.DIAGNOSTIC.
+
+    Data Source:
+        :attr:`DysonDevice.robot_dock_state`, the MQTT ``dockState`` field.
+        Only ever observed in CURRENT-STATE (never STATE-CHANGE) across two
+        independent probe captures, so — like the robot battery/charging
+        sensors — this is stale between CURRENT-STATE heartbeats and
+        unknown until the first one after a restart.
+
+    Availability:
+        Only created for devices with "robot" device category that report
+        a ``dockState`` value in their state data (docks without a wash/dry
+        cycle never send this field, so the sensor is skipped rather than
+        created permanently-unknown).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    _attr_options = ["IDLE", "WASHING_MOP", "COLLECTING_DUST", "DRYING_MOP"]
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the robot dock state sensor."""
+        super().__init__(coordinator)
+
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_dock_state"
+        self._attr_translation_key = "robot_dock_state"
+        self._attr_device_class = SensorDeviceClass.ENUM
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:water-pump"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        device_serial = self.coordinator.serial_number
+
+        try:
+            new_value = device.robot_dock_state if device else None
+            # An unrecognized value (future firmware) would violate the
+            # ENUM device_class's options contract — surface it as
+            # unknown rather than a value HA cannot render.
+            if new_value not in self._attr_options:
+                new_value = None
+
+            old_value = self._attr_native_value
+            self._attr_native_value = new_value
+
+            if new_value is not None:
+                _LOGGER.debug(
+                    "Robot dock state sensor updated for %s: %s -> %s",
+                    device_serial,
+                    old_value,
+                    new_value,
+                )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot dock state sensor for device %s: %s",
                 device_serial,
                 err,
             )

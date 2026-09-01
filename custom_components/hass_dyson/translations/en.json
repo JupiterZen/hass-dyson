@@ -252,6 +252,9 @@
       "aqi_category": {
         "name": "Air Quality Category"
       },
+      "robot_dock_state": {
+        "name": "Dock State"
+      },
       "dominant_pollutant": {
         "name": "Dominant Pollutant"
       },
