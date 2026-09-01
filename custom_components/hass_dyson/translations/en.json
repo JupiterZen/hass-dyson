@@ -302,6 +302,15 @@
       "find_follow": {
         "name": "Find+Follow"
       },
+      "robot_child_lock": {
+        "name": "Child Lock"
+      },
+      "robot_wash_mop_before_clean": {
+        "name": "Wash Mop Before Clean"
+      },
+      "robot_do_not_disturb": {
+        "name": "Do Not Disturb"
+      },
       "daylight_mode": {
         "name": "Daylight Mode"
       }

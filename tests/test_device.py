@@ -1896,6 +1896,114 @@ class TestDysonDeviceProperties:
 
         assert device_with_state.robot_dock_state is None
 
+    def test_robot_child_lock_reported(self, device_with_state):
+        device_with_state._state_data = {"childLock": True}
+        assert device_with_state.robot_child_lock is True
+
+    def test_robot_child_lock_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_child_lock is None
+
+    def test_robot_wash_mop_before_clean_reported(self, device_with_state):
+        device_with_state._state_data = {"washMopBeforeClean": False}
+        assert device_with_state.robot_wash_mop_before_clean is False
+
+    def test_robot_wash_mop_before_clean_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_wash_mop_before_clean is None
+
+    def test_robot_do_not_disturb_reported(self, device_with_state):
+        dnd = {"isOn": True, "startTime": "22:00", "endTime": "8:00"}
+        device_with_state._state_data = {"doNotDisturbMode": dnd}
+        assert device_with_state.robot_do_not_disturb == dnd
+
+    def test_robot_do_not_disturb_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_do_not_disturb is None
+
+    def test_robot_do_not_disturb_wrong_type(self, device_with_state):
+        """A malformed (non-dict) doNotDisturbMode is treated as not-reported."""
+        device_with_state._state_data = {"doNotDisturbMode": True}
+        assert device_with_state.robot_do_not_disturb is None
+
+
+class TestDysonDeviceRobotCommands:
+    """Test the (unverified) robot STATE-SET write methods."""
+
+    @pytest.fixture
+    def device_with_state(self, mock_hass):
+        device = DysonDevice(
+            hass=mock_hass,
+            serial_number="PROP123",
+            host="192.168.1.100",
+            credential="test_cred",
+        )
+        device._send_robot_command = AsyncMock()
+        return device
+
+    @pytest.mark.asyncio
+    async def test_set_robot_child_lock_true(self, device_with_state):
+        await device_with_state.set_robot_child_lock(True)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["data"] == {"childLock": True}
+
+    @pytest.mark.asyncio
+    async def test_set_robot_wash_mop_before_clean_false(self, device_with_state):
+        await device_with_state.set_robot_wash_mop_before_clean(False)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["data"] == {"washMopBeforeClean": False}
+
+    @pytest.mark.asyncio
+    async def test_set_robot_do_not_disturb_enable_with_times(self, device_with_state):
+        await device_with_state.set_robot_do_not_disturb(
+            True, start_time="23:00", end_time="7:00"
+        )
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["data"] == {
+            "doNotDisturbMode": {
+                "isOn": True,
+                "startTime": "23:00",
+                "endTime": "7:00",
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_set_robot_do_not_disturb_preserves_existing_schedule(
+        self, device_with_state
+    ):
+        """Toggling isOn without times keeps the last-known schedule, not a hardcoded default."""
+        device_with_state._state_data = {
+            "doNotDisturbMode": {
+                "isOn": False,
+                "startTime": "21:00",
+                "endTime": "6:30",
+            }
+        }
+        await device_with_state.set_robot_do_not_disturb(True)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["data"]["doNotDisturbMode"] == {
+            "isOn": True,
+            "startTime": "21:00",
+            "endTime": "6:30",
+        }
+
+    @pytest.mark.asyncio
+    async def test_set_robot_do_not_disturb_falls_back_to_default_times(
+        self, device_with_state
+    ):
+        """No prior schedule and no explicit times: falls back to 22:00/8:00."""
+        device_with_state._state_data = {}
+        await device_with_state.set_robot_do_not_disturb(True)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["data"]["doNotDisturbMode"] == {
+            "isOn": True,
+            "startTime": "22:00",
+            "endTime": "8:00",
+        }
+
 
 class TestDysonDeviceMQTTCallbacks:
     """Test MQTT connection and callback functionality."""

@@ -2984,6 +2984,39 @@ class DysonDevice:
         return value if isinstance(value, str) and value else None
 
     @property
+    def robot_child_lock(self) -> bool | None:
+        """Return the robot's child lock state, if reported.
+
+        ``childLock`` is a plain top-level boolean in CURRENT-STATE (never
+        seen in STATE-CHANGE across two independent probe captures), unlike
+        :attr:`robot_do_not_disturb`, which is an object.
+        """
+        value = self._state_data.get("childLock")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def robot_wash_mop_before_clean(self) -> bool | None:
+        """Return whether the dock washes the mop before the robot departs.
+
+        ``washMopBeforeClean`` is a plain top-level boolean in CURRENT-STATE
+        (never seen in STATE-CHANGE across two independent probe captures).
+        """
+        value = self._state_data.get("washMopBeforeClean")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def robot_do_not_disturb(self) -> dict | None:
+        """Return the robot's do-not-disturb schedule, if reported.
+
+        Unlike ``childLock``/``washMopBeforeClean``, ``doNotDisturbMode`` is
+        an object: ``{"isOn": bool, "startTime": "22:00", "endTime": "8:00"}``.
+        Only ever seen in CURRENT-STATE across two independent probe
+        captures, never STATE-CHANGE.
+        """
+        value = self._state_data.get("doNotDisturbMode")
+        return value if isinstance(value, dict) else None
+
+    @property
     def robot_last_clean_zones(self) -> list[str]:
         """Zones targeted by the current/most recent MQTT-commanded clean.
 
@@ -3815,6 +3848,67 @@ class DysonDevice:
                 "Failed to send robot command to %s: %s", self._log_serial, ex
             )
             raise
+
+    async def set_robot_child_lock(self, enabled: bool) -> None:
+        """Set the robot's child lock on/off.
+
+        UNVERIFIED: no probe capture ever recorded an app-initiated write to
+        ``childLock`` — the STATE-SET message shape below follows the fan
+        product-state convention (:meth:`set_auto_mode`) as the closest known
+        analogue, but has not been confirmed against a real RB05. If this
+        does not take effect, capture the MQTT traffic from an app-side
+        toggle (see ``robot-probe/README.md``) and correct this method.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "time": self._get_command_timestamp(),
+                "data": {"childLock": enabled},
+            }
+        )
+
+    async def set_robot_wash_mop_before_clean(self, enabled: bool) -> None:
+        """Set whether the dock washes the mop before the robot departs.
+
+        UNVERIFIED: see :meth:`set_robot_child_lock` — same caveat, no
+        captured app-initiated write to confirm the command shape.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "time": self._get_command_timestamp(),
+                "data": {"washMopBeforeClean": enabled},
+            }
+        )
+
+    async def set_robot_do_not_disturb(
+        self,
+        enabled: bool,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> None:
+        """Set the robot's do-not-disturb schedule.
+
+        UNVERIFIED: see :meth:`set_robot_child_lock` — same caveat. Also
+        unconfirmed: whether the robot expects the full
+        ``{"isOn", "startTime", "endTime"}`` object on every write or
+        tolerates a partial one — this always sends all three, falling back
+        to the last-known schedule via :attr:`robot_do_not_disturb` when a
+        time isn't given, to avoid accidentally clearing it.
+        """
+        current = self.robot_do_not_disturb or {}
+        payload = {
+            "isOn": enabled,
+            "startTime": start_time or current.get("startTime", "22:00"),
+            "endTime": end_time or current.get("endTime", "8:00"),
+        }
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "time": self._get_command_timestamp(),
+                "data": {"doNotDisturbMode": payload},
+            }
+        )
 
     async def set_direction(self, direction: str) -> None:
         """Set fan direction (forward/reverse).

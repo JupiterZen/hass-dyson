@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CAPABILITY_ENVIRONMENTAL_DATA, DOMAIN
+from .const import CAPABILITY_ENVIRONMENTAL_DATA, DEVICE_CATEGORY_ROBOT, DOMAIN
 from .coordinator import DysonBLEDataUpdateCoordinator, DysonDataUpdateCoordinator
 from .device_utils import mask_serial
 from .entity import DysonBLEEntity, DysonEntity
@@ -74,6 +74,23 @@ async def async_setup_entry(
             ff_product_state = raw_ps
     if "soon" in ff_product_state:
         entities.append(DysonFindFollowSwitch(coordinator))
+
+    # Robot vacuum switches — only for devices that have reported the
+    # corresponding CURRENT-STATE field at least once, matching the
+    # dockState sensor's gate: a robot without a wash/dry dock or without
+    # child-lock hardware never sends these fields, so skip rather than
+    # create a permanently-unknown entity.
+    device_category = coordinator.device_category or []
+    if (
+        any(cat == DEVICE_CATEGORY_ROBOT for cat in device_category)
+        and coordinator.data
+    ):
+        if "childLock" in coordinator.data:
+            entities.append(DysonRobotChildLockSwitch(coordinator))
+        if "washMopBeforeClean" in coordinator.data:
+            entities.append(DysonRobotWashMopBeforeCleanSwitch(coordinator))
+        if "doNotDisturbMode" in coordinator.data:
+            entities.append(DysonRobotDoNotDisturbSwitch(coordinator))
 
     async_add_entities(entities, True)
     return True
@@ -664,6 +681,259 @@ class DysonFindFollowSwitch(DysonEntity, SwitchEntity):
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error disabling Find+Follow for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonRobotChildLockSwitch(DysonEntity, SwitchEntity):
+    """Switch for a robot vacuum's child lock.
+
+    UNVERIFIED write path: no probe capture ever recorded an app-initiated
+    write to ``childLock``, so :meth:`DysonDevice.set_robot_child_lock`'s
+    STATE-SET command shape is unconfirmed against a real RB05 — see that
+    method's docstring. Reading the current state is confirmed (top-level
+    CURRENT-STATE boolean).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the robot child lock switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_child_lock"
+        self._attr_translation_key = "robot_child_lock"
+        self._attr_icon = "mdi:lock"
+        self._attr_is_on = (
+            coordinator.device.robot_child_lock if coordinator.device else None
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_is_on = (
+            self.coordinator.device.robot_child_lock
+            if self.coordinator.device
+            else None
+        )
+        super()._handle_coordinator_update()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable the robot's child lock."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_child_lock(True)
+            _LOGGER.debug(
+                "Enabled child lock for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error enabling child lock for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error enabling child lock for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable the robot's child lock."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_child_lock(False)
+            _LOGGER.debug(
+                "Disabled child lock for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error disabling child lock for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error disabling child lock for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonRobotWashMopBeforeCleanSwitch(DysonEntity, SwitchEntity):
+    """Switch for whether the dock washes the mop before the robot departs.
+
+    UNVERIFIED write path — see :class:`DysonRobotChildLockSwitch`. Reading
+    the current state is confirmed (top-level CURRENT-STATE boolean).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the wash-mop-before-clean switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.serial_number}_robot_wash_mop_before_clean"
+        )
+        self._attr_translation_key = "robot_wash_mop_before_clean"
+        self._attr_icon = "mdi:water-pump"
+        self._attr_is_on = (
+            coordinator.device.robot_wash_mop_before_clean
+            if coordinator.device
+            else None
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_is_on = (
+            self.coordinator.device.robot_wash_mop_before_clean
+            if self.coordinator.device
+            else None
+        )
+        super()._handle_coordinator_update()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable washing the mop before the robot departs."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_wash_mop_before_clean(True)
+            _LOGGER.debug(
+                "Enabled wash-mop-before-clean for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error enabling wash-mop-before-clean for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error enabling wash-mop-before-clean for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable washing the mop before the robot departs."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_wash_mop_before_clean(False)
+            _LOGGER.debug(
+                "Disabled wash-mop-before-clean for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error disabling wash-mop-before-clean for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error disabling wash-mop-before-clean for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonRobotDoNotDisturbSwitch(DysonEntity, SwitchEntity):
+    """Switch for a robot vacuum's do-not-disturb schedule.
+
+    ``doNotDisturbMode`` is an object (``isOn``/``startTime``/``endTime``),
+    unlike the plain boolean fields on the sibling robot switches — the
+    schedule times are exposed as extra state attributes rather than a
+    separate entity, since HA has no built-in "switch with a time range"
+    entity type.
+
+    UNVERIFIED write path — see :class:`DysonRobotChildLockSwitch`. Reading
+    the current state is confirmed (top-level CURRENT-STATE object).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the do-not-disturb switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_do_not_disturb"
+        self._attr_translation_key = "robot_do_not_disturb"
+        self._attr_icon = "mdi:sleep"
+        dnd = coordinator.device.robot_do_not_disturb if coordinator.device else None
+        self._attr_is_on = dnd.get("isOn") if dnd else None
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        dnd = (
+            self.coordinator.device.robot_do_not_disturb
+            if self.coordinator.device
+            else None
+        )
+        self._attr_is_on = dnd.get("isOn") if dnd else None
+        super()._handle_coordinator_update()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return the do-not-disturb schedule's start/end times."""
+        dnd = (
+            self.coordinator.device.robot_do_not_disturb
+            if self.coordinator.device
+            else None
+        )
+        if not dnd:
+            return None
+        return {
+            "start_time": dnd.get("startTime"),
+            "end_time": dnd.get("endTime"),
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable do-not-disturb, keeping the last-known schedule times."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_do_not_disturb(True)
+            _LOGGER.debug(
+                "Enabled do-not-disturb for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error enabling do-not-disturb for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error enabling do-not-disturb for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable do-not-disturb, keeping the last-known schedule times."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_do_not_disturb(False)
+            _LOGGER.debug(
+                "Disabled do-not-disturb for %s",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error disabling do-not-disturb for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error disabling do-not-disturb for %s: %s",
                 self.coordinator.serial_number,
                 err,
             )
