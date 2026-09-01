@@ -3175,6 +3175,121 @@ class DysonDevice:
         return value if isinstance(value, dict) else None
 
     @property
+    def robot_alarm(self) -> bool | None:
+        """Return the robot's "find my robot" alarm/chime setting, if reported.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): app sent
+        ``{"mode-reason":"RAPP","time":"...","alarm":true,"msg":
+        "STATE-SET"}``, robot's next CURRENT-STATE reflected the change
+        immediately. Plain top-level boolean, only ever seen in
+        CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("alarm")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def robot_volume(self) -> int | None:
+        """Return the robot's voice/alert volume level, if reported.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): app sent
+        ``{"volume":40,"mode-reason":"RAPP","time":"...","msg":
+        "STATE-SET"}``, robot's next CURRENT-STATE reflected the change
+        immediately. Range unconfirmed — only 40 and the pre-existing 50
+        were observed; scale is presumably 0-100 (unverified). Only ever
+        seen in CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("volume")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    @property
+    def robot_full_clean_action(self) -> str | None:
+        """Return the robot's current clean action, if reported.
+
+        Three values observed across probe captures: ``NONE``,
+        ``VACUUMING``, ``VACUUMING_AND_MOPPING``. No write ever attempted
+        or observed — treated as read-only status, likely derived from
+        ``currentCleaningMode``/device capabilities rather than a user
+        setting. Only ever seen in CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("fullCleanAction")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def robot_cleaning_state(self) -> str | None:
+        """Return the robot's current cleaning sub-state, if reported.
+
+        Two values observed across probe captures: ``NOT_CLEANING``,
+        ``REMOVING_DIRT`` — a finer-grained status alongside the main
+        ``state``/``robot_state`` field, not a replacement for it. No
+        write ever attempted or observed — read-only status. Only ever
+        seen in CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("cleaningState")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def robot_consumables(self) -> list | None:
+        """Return the robot's per-part consumable usage list, if reported.
+
+        Each entry: ``{"type": <str>, "usage": <int>}`` for most parts, or
+        ``{"type": "cleaningSolution", "needsRefill": <bool>}`` (no
+        ``usage`` key — different shape for this one type). Types observed:
+        ``brushBar``, ``mopRoller``, ``sideBrushes``, ``robotFilter``,
+        ``dockFilter``, ``ioniserCartridge``, ``cleaningSolution``.
+        ``usage``'s unit/scale is unconfirmed (percentage worn? cycle
+        count? hours?) — values never changed within either probe capture,
+        so no before/after to derive a scale from.
+        ``ioniserCartridge``'s ``usage: -1`` on this robot is presumed
+        "not installed / not applicable" rather than a real usage value,
+        but that's an inference, not a confirmed sentinel.
+        """
+        value = self._state_data.get("consumables")
+        return value if isinstance(value, list) else None
+
+    @property
+    def robot_detergent(self) -> bool | None:
+        """Return the robot's detergent-use setting, if reported.
+
+        Plain top-level boolean, constant (``true``) across both probe
+        captures — never toggled, so the write path is UNVERIFIED (see
+        :meth:`set_robot_detergent`). Only ever seen in CURRENT-STATE,
+        never STATE-CHANGE.
+        """
+        value = self._state_data.get("detergent")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def robot_hot_water_mop(self) -> bool | None:
+        """Return the robot's hot-water-mop setting, if reported.
+
+        Distinct from :attr:`robot_hot_water_switch` (that one is the
+        "Zelfreinigend met heet water" dock self-clean toggle, confirmed
+        writable) — this field's relationship to that setting is
+        unconfirmed; it may be a related but separate control. Plain
+        top-level boolean, constant (``true``) across both probe captures
+        — never toggled, so the write path is UNVERIFIED (see
+        :meth:`set_robot_hot_water_mop`). Only ever seen in CURRENT-STATE,
+        never STATE-CHANGE.
+        """
+        value = self._state_data.get("hotWaterMop")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def robot_collect_dust_on_self_clean(self) -> bool | None:
+        """Return the robot's collect-dust-on-self-clean setting, if reported.
+
+        Confirmed distinct from "empty bin on dock" behavior (see
+        ``robot-probe/README.md``: observed ``false`` during a
+        ``dockState: COLLECTING_DUST`` cycle). Plain top-level boolean,
+        constant (``false``) across both probe captures — never toggled,
+        so the write path is UNVERIFIED (see
+        :meth:`set_robot_collect_dust_on_self_clean`). Only ever seen in
+        CURRENT-STATE, never STATE-CHANGE.
+        """
+        value = self._state_data.get("collectDustOnSelfClean")
+        return value if isinstance(value, bool) else None
+
+    @property
     def robot_last_clean_zones(self) -> list[str]:
         """Zones targeted by the current/most recent MQTT-commanded clean.
 
@@ -4188,6 +4303,92 @@ class DysonDevice:
         await self._send_robot_command(
             {
                 "msg": "REQUEST-VOICE-DOWNLOAD-STATUS",
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_alarm(self, enabled: bool) -> None:
+        """Set the robot's "find my robot" alarm/chime.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): app sent
+        ``{"mode-reason":"RAPP","time":"...","alarm":true,"msg":
+        "STATE-SET"}``, robot's next CURRENT-STATE reflected the change
+        immediately.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "alarm": enabled,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_volume(self, volume: int) -> None:
+        """Set the robot's voice/alert volume level.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): app sent
+        ``{"volume":40,"mode-reason":"RAPP","time":"...","msg":
+        "STATE-SET"}``, robot's next CURRENT-STATE reflected the change
+        immediately. Scale/range unconfirmed — only 40 was sent, against
+        a pre-existing 50; assumed 0-100 without further evidence.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "volume": volume,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_detergent(self, enabled: bool) -> None:
+        """Set the robot's detergent-use setting.
+
+        UNVERIFIED: ``detergent`` was constant across both probe
+        captures, never toggled by the app — the STATE-SET envelope
+        shape below follows the pattern confirmed for other robot fields
+        (:meth:`set_robot_alarm`, etc.), but this specific field/value
+        pairing has not been confirmed against a real RB05.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "detergent": enabled,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_hot_water_mop(self, enabled: bool) -> None:
+        """Set the robot's hot-water-mop setting.
+
+        UNVERIFIED: see :meth:`set_robot_detergent` — same caveat, no
+        captured app-initiated write to confirm the command shape for
+        this specific field. Distinct from :meth:`set_robot_hot_water_switch`
+        (confirmed writable) — see :attr:`robot_hot_water_mop`'s docstring
+        for how the two fields relate (unconfirmed).
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "hotWaterMop": enabled,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_collect_dust_on_self_clean(self, enabled: bool) -> None:
+        """Set the robot's collect-dust-on-self-clean setting.
+
+        UNVERIFIED: see :meth:`set_robot_detergent` — same caveat, no
+        captured app-initiated write to confirm the command shape.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "STATE-SET",
+                "collectDustOnSelfClean": enabled,
                 "time": self._get_command_timestamp(),
                 "mode-reason": "RAPP",
             }

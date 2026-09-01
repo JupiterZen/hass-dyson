@@ -93,6 +93,14 @@ async def async_setup_entry(
             entities.append(DysonRobotDoNotDisturbSwitch(coordinator))
         if "hotWaterSwitch" in coordinator.data:
             entities.append(DysonRobotHotWaterSwitchSwitch(coordinator))
+        if "alarm" in coordinator.data:
+            entities.append(DysonRobotAlarmSwitch(coordinator))
+        if "detergent" in coordinator.data:
+            entities.append(DysonRobotDetergentSwitch(coordinator))
+        if "hotWaterMop" in coordinator.data:
+            entities.append(DysonRobotHotWaterMopSwitch(coordinator))
+        if "collectDustOnSelfClean" in coordinator.data:
+            entities.append(DysonRobotCollectDustOnSelfCleanSwitch(coordinator))
 
     async_add_entities(entities, True)
     return True
@@ -1014,6 +1022,145 @@ class DysonRobotHotWaterSwitchSwitch(DysonEntity, SwitchEntity):
                 self.coordinator.serial_number,
                 err,
             )
+
+
+class _DysonRobotBooleanSwitch(DysonEntity, SwitchEntity):
+    """Shared base for robot switches on a single plain boolean CURRENT-STATE field.
+
+    Subclasses set the four class attributes below; the read/update/
+    turn_on/turn_off logic is identical across all of them (device
+    property getter -> _attr_is_on, device method -> turn_on/turn_off).
+    Used for both confirmed-writable fields (alarm) and UNVERIFIED ones
+    (detergent, hotWaterMop, collectDustOnSelfClean) — see each concrete
+    subclass's docstring for its own verification status.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    #: Suffix for the unique_id and the translation_key (e.g. "alarm").
+    _KEY: str = ""
+    #: mdi icon name.
+    _ICON: str = ""
+    #: Attribute name on DysonDevice to read the current state from.
+    _GETTER: str = ""
+    #: Method name on DysonDevice to call with the new bool value.
+    _SETTER: str = ""
+    #: Human-readable label used only in log messages.
+    _LABEL: str = ""
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_{self._KEY}"
+        self._attr_translation_key = f"robot_{self._KEY}"
+        self._attr_icon = self._ICON
+        self._attr_is_on = (
+            getattr(coordinator.device, self._GETTER) if coordinator.device else None
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_is_on = (
+            getattr(self.coordinator.device, self._GETTER)
+            if self.coordinator.device
+            else None
+        )
+        super()._handle_coordinator_update()
+
+    async def _set(self, enabled: bool) -> None:
+        if not self.coordinator.device:
+            return
+        try:
+            await getattr(self.coordinator.device, self._SETTER)(enabled)
+            _LOGGER.debug(
+                "%s %s for %s",
+                "Enabled" if enabled else "Disabled",
+                self._LABEL,
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error setting %s to %s for %s: %s",
+                self._LABEL,
+                enabled,
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error setting %s to %s for %s: %s",
+                self._LABEL,
+                enabled,
+                self.coordinator.serial_number,
+                err,
+            )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn the switch on."""
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the switch off."""
+        await self._set(False)
+
+
+class DysonRobotAlarmSwitch(_DysonRobotBooleanSwitch):
+    """Switch for the robot's "find my robot" alarm/chime.
+
+    VERIFIED write path (1 sep 2026 probe) — see
+    :meth:`DysonDevice.set_robot_alarm`.
+    """
+
+    _KEY = "alarm"
+    _ICON = "mdi:bell-ring"
+    _GETTER = "robot_alarm"
+    _SETTER = "set_robot_alarm"
+    _LABEL = "alarm"
+
+
+class DysonRobotDetergentSwitch(_DysonRobotBooleanSwitch):
+    """Switch for the robot's detergent-use setting.
+
+    UNVERIFIED write path — see :meth:`DysonDevice.set_robot_detergent`.
+    """
+
+    _KEY = "detergent"
+    _ICON = "mdi:spray-bottle"
+    _GETTER = "robot_detergent"
+    _SETTER = "set_robot_detergent"
+    _LABEL = "detergent"
+
+
+class DysonRobotHotWaterMopSwitch(_DysonRobotBooleanSwitch):
+    """Switch for the robot's hot-water-mop setting.
+
+    UNVERIFIED write path — see :meth:`DysonDevice.set_robot_hot_water_mop`.
+    Distinct from :class:`DysonRobotHotWaterSwitchSwitch` (confirmed
+    writable) — see :attr:`DysonDevice.robot_hot_water_mop`'s docstring
+    for how the two relate (unconfirmed).
+    """
+
+    _KEY = "hot_water_mop"
+    _ICON = "mdi:water-thermometer-outline"
+    _GETTER = "robot_hot_water_mop"
+    _SETTER = "set_robot_hot_water_mop"
+    _LABEL = "hot-water mop"
+
+
+class DysonRobotCollectDustOnSelfCleanSwitch(_DysonRobotBooleanSwitch):
+    """Switch for the robot's collect-dust-on-self-clean setting.
+
+    UNVERIFIED write path — see
+    :meth:`DysonDevice.set_robot_collect_dust_on_self_clean`. Confirmed
+    distinct from "empty bin on dock" behavior (see
+    :attr:`DysonDevice.robot_collect_dust_on_self_clean`'s docstring).
+    """
+
+    _KEY = "collect_dust_on_self_clean"
+    _ICON = "mdi:vacuum"
+    _GETTER = "robot_collect_dust_on_self_clean"
+    _SETTER = "set_robot_collect_dust_on_self_clean"
+    _LABEL = "collect-dust-on-self-clean"
 
 
 class DysonDaylightModeSwitch(DysonBLEEntity, SwitchEntity):

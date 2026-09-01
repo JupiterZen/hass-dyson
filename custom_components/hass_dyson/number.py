@@ -66,6 +66,8 @@ async def async_setup_entry(
         and "airDryFrequency" in coordinator.data
     ):
         entities.append(DysonRobotAirDryFrequencyNumber(coordinator))
+        if "volume" in coordinator.data:
+            entities.append(DysonRobotVolumeNumber(coordinator))
 
     async_add_entities(entities, True)
 
@@ -424,6 +426,72 @@ class DysonRobotAirDryFrequencyNumber(DysonEntity, NumberEntity):
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error setting air-dry duration to %s for %s: %s",
+                value,
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonRobotVolumeNumber(DysonEntity, NumberEntity):
+    """Number entity for the robot's voice/alert volume.
+
+    Write path VERIFIED 1 sep 2026 probe capture — see
+    :meth:`DysonDevice.set_robot_volume`. Range unconfirmed: only 40 and
+    the pre-existing 50 were observed, assumed 0-100 without further
+    evidence.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the volume number."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_volume"
+        self._attr_translation_key = "robot_volume"
+        self._attr_icon = "mdi:volume-high"
+        self._attr_mode = NumberMode.SLIDER
+        self._attr_native_min_value = 0
+        self._attr_native_max_value = 100
+        self._attr_native_step = 10
+        self._attr_native_value = (
+            coordinator.device.robot_volume if coordinator.device else None
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_native_value = (
+            self.coordinator.device.robot_volume if self.coordinator.device else None
+        )
+        super()._handle_coordinator_update()
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the robot's volume level."""
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_volume(int(value))
+            _LOGGER.debug(
+                "Set volume to %s for %s",
+                int(value),
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error setting volume to %s for %s: %s",
+                value,
+                self.coordinator.serial_number,
+                err,
+            )
+        except (ValueError, TypeError) as err:
+            _LOGGER.warning(
+                "Invalid volume value %s for %s: %s",
+                value,
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error setting volume to %s for %s: %s",
                 value,
                 self.coordinator.serial_number,
                 err,

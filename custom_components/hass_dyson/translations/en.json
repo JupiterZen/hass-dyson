@@ -261,6 +261,15 @@
       "robot_voice_download_status": {
         "name": "Voice Download Status"
       },
+      "robot_full_clean_action": {
+        "name": "Full Clean Action"
+      },
+      "robot_cleaning_state": {
+        "name": "Cleaning State"
+      },
+      "robot_consumable": {
+        "name": "{part} Usage"
+      },
       "dominant_pollutant": {
         "name": "Dominant Pollutant"
       },
@@ -319,6 +328,18 @@
       },
       "robot_hot_water_switch": {
         "name": "Hot Water Self-Clean"
+      },
+      "robot_alarm": {
+        "name": "Find My Robot Alarm"
+      },
+      "robot_detergent": {
+        "name": "Detergent"
+      },
+      "robot_hot_water_mop": {
+        "name": "Hot Water Mop"
+      },
+      "robot_collect_dust_on_self_clean": {
+        "name": "Collect Dust On Self-Clean"
       },
       "daylight_mode": {
         "name": "Daylight Mode"
@@ -388,6 +409,9 @@
       },
       "robot_air_dry_frequency": {
         "name": "Mop Air-Dry Duration"
+      },
+      "robot_volume": {
+        "name": "Volume"
       }
     },
     "binary_sensor": {

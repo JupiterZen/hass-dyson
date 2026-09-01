@@ -244,6 +244,111 @@ class TestSensorPlatformSetup:
         sensor_types = [type(entity).__name__ for entity in entities]
         assert "DysonRobotVoiceDownloadStatusSensor" in sensor_types
 
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_creates_full_clean_action_and_cleaning_state(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {
+            "fullCleanAction": "NONE",
+            "cleaningState": "NOT_CLEANING",
+        }
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotFullCleanActionSensor" in sensor_types
+        assert "DysonRobotCleaningStateSensor" in sensor_types
+
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_skips_full_clean_action_and_cleaning_state_when_absent(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {}
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotFullCleanActionSensor" not in sensor_types
+        assert "DysonRobotCleaningStateSensor" not in sensor_types
+
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_creates_one_consumable_sensor_per_reported_part(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {
+            "consumables": [
+                {"type": "brushBar", "usage": 1},
+                {"type": "cleaningSolution", "needsRefill": False},
+            ]
+        }
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
+
+        consumable_sensors = [
+            e for e in entities if isinstance(e, DysonRobotConsumableSensor)
+        ]
+        assert len(consumable_sensors) == 2
+        part_types = {s._part_type for s in consumable_sensors}
+        assert part_types == {"brushBar", "cleaningSolution"}
+
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_no_consumable_sensors_when_absent(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {}
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
+
+        assert not any(isinstance(e, DysonRobotConsumableSensor) for e in entities)
+
 
 class TestDysonPM25Sensor:
     """Test DysonPM25Sensor using pure pytest."""
@@ -1375,6 +1480,152 @@ class TestDysonRobotVoiceDownloadStatusSensor:
         )
 
         sensor = DysonRobotVoiceDownloadStatusSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+        pure_mock_coordinator.device = None
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+
+class TestDysonRobotFullCleanActionSensor:
+    """Test DysonRobotFullCleanActionSensor using pure pytest."""
+
+    def test_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotFullCleanActionSensor,
+        )
+
+        sensor = DysonRobotFullCleanActionSensor(pure_mock_coordinator)
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_full_clean_action"
+        )
+        assert sensor._attr_translation_key == "robot_full_clean_action"
+
+    def test_sensor_update(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotFullCleanActionSensor,
+        )
+
+        pure_mock_coordinator.device.robot_full_clean_action = "VACUUMING"
+        sensor = DysonRobotFullCleanActionSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "VACUUMING"
+
+    def test_sensor_missing(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotFullCleanActionSensor,
+        )
+
+        pure_mock_coordinator.device.robot_full_clean_action = None
+        sensor = DysonRobotFullCleanActionSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+
+class TestDysonRobotCleaningStateSensor:
+    """Test DysonRobotCleaningStateSensor using pure pytest."""
+
+    def test_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import DysonRobotCleaningStateSensor
+
+        sensor = DysonRobotCleaningStateSensor(pure_mock_coordinator)
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_cleaning_state"
+        )
+        assert sensor._attr_translation_key == "robot_cleaning_state"
+
+    def test_sensor_update(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import DysonRobotCleaningStateSensor
+
+        pure_mock_coordinator.device.robot_cleaning_state = "REMOVING_DIRT"
+        sensor = DysonRobotCleaningStateSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "REMOVING_DIRT"
+
+
+class TestDysonRobotConsumableSensor:
+    """Test DysonRobotConsumableSensor using pure pytest."""
+
+    def test_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
+
+        sensor = DysonRobotConsumableSensor(pure_mock_coordinator, "brushBar")
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_consumable_brushbar"
+        )
+        assert sensor._attr_translation_key == "robot_consumable"
+        assert sensor._attr_translation_placeholders == {"part": "brushBar"}
+
+    def test_sensor_update_usage_shape(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
+
+        pure_mock_coordinator.device.robot_consumables = [
+            {"type": "brushBar", "usage": 1},
+            {"type": "mopRoller", "usage": 4},
+        ]
+        sensor = DysonRobotConsumableSensor(pure_mock_coordinator, "brushBar")
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == 1
+        assert sensor._attr_extra_state_attributes == {}
+
+    def test_sensor_update_needs_refill_shape(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
+
+        pure_mock_coordinator.device.robot_consumables = [
+            {"type": "cleaningSolution", "needsRefill": True},
+        ]
+        sensor = DysonRobotConsumableSensor(pure_mock_coordinator, "cleaningSolution")
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+        assert sensor._attr_extra_state_attributes == {"needs_refill": True}
+
+    def test_sensor_update_part_not_in_list(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
+
+        pure_mock_coordinator.device.robot_consumables = [
+            {"type": "mopRoller", "usage": 4},
+        ]
+        sensor = DysonRobotConsumableSensor(pure_mock_coordinator, "brushBar")
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+    def test_sensor_device_unavailable(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
+
+        sensor = DysonRobotConsumableSensor(pure_mock_coordinator, "brushBar")
         sensor.hass = pure_mock_hass
         pure_mock_coordinator.device = None
 

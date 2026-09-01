@@ -15,8 +15,12 @@ import pytest
 
 from custom_components.hass_dyson.const import CONF_HOSTNAME
 from custom_components.hass_dyson.switch import (
+    DysonRobotAlarmSwitch,
     DysonRobotChildLockSwitch,
+    DysonRobotCollectDustOnSelfCleanSwitch,
+    DysonRobotDetergentSwitch,
     DysonRobotDoNotDisturbSwitch,
+    DysonRobotHotWaterMopSwitch,
     DysonRobotHotWaterSwitchSwitch,
     DysonRobotWashMopBeforeCleanSwitch,
     async_setup_entry as switch_setup_entry,
@@ -42,6 +46,10 @@ def mock_coordinator():
         "endTime": "8:00",
     }
     coordinator.device.robot_hot_water_switch = True
+    coordinator.device.robot_alarm = False
+    coordinator.device.robot_detergent = True
+    coordinator.device.robot_hot_water_mop = True
+    coordinator.device.robot_collect_dust_on_self_clean = False
     coordinator.device_capabilities = []
     coordinator.device_category = ["robot"]
     coordinator.config_entry = Mock()
@@ -51,6 +59,10 @@ def mock_coordinator():
         "washMopBeforeClean": True,
         "doNotDisturbMode": {"isOn": False, "startTime": "22:00", "endTime": "8:00"},
         "hotWaterSwitch": True,
+        "alarm": False,
+        "detergent": True,
+        "hotWaterMop": True,
+        "collectDustOnSelfClean": False,
     }
     return coordinator
 
@@ -92,6 +104,12 @@ class TestRobotSwitchCreation:
         assert any(isinstance(e, DysonRobotWashMopBeforeCleanSwitch) for e in entities)
         assert any(isinstance(e, DysonRobotDoNotDisturbSwitch) for e in entities)
         assert any(isinstance(e, DysonRobotHotWaterSwitchSwitch) for e in entities)
+        assert any(isinstance(e, DysonRobotAlarmSwitch) for e in entities)
+        assert any(isinstance(e, DysonRobotDetergentSwitch) for e in entities)
+        assert any(isinstance(e, DysonRobotHotWaterMopSwitch) for e in entities)
+        assert any(
+            isinstance(e, DysonRobotCollectDustOnSelfCleanSwitch) for e in entities
+        )
 
     @pytest.mark.asyncio
     async def test_none_created_for_non_robot_category(
@@ -108,6 +126,7 @@ class TestRobotSwitchCreation:
         )
         assert not any(isinstance(e, DysonRobotDoNotDisturbSwitch) for e in entities)
         assert not any(isinstance(e, DysonRobotHotWaterSwitchSwitch) for e in entities)
+        assert not any(isinstance(e, DysonRobotAlarmSwitch) for e in entities)
 
     @pytest.mark.asyncio
     async def test_hot_water_switch_not_created_when_absent(
@@ -118,6 +137,25 @@ class TestRobotSwitchCreation:
         await switch_setup_entry(mock_hass, mock_config_entry, mock_add)
         entities = mock_add.call_args[0][0]
         assert not any(isinstance(e, DysonRobotHotWaterSwitchSwitch) for e in entities)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "data_key,switch_class",
+        [
+            ("alarm", DysonRobotAlarmSwitch),
+            ("detergent", DysonRobotDetergentSwitch),
+            ("hotWaterMop", DysonRobotHotWaterMopSwitch),
+            ("collectDustOnSelfClean", DysonRobotCollectDustOnSelfCleanSwitch),
+        ],
+    )
+    async def test_new_switch_not_created_when_absent(
+        self, mock_hass, mock_config_entry, mock_coordinator, data_key, switch_class
+    ):
+        del mock_coordinator.data[data_key]
+        mock_add = MagicMock()
+        await switch_setup_entry(mock_hass, mock_config_entry, mock_add)
+        entities = mock_add.call_args[0][0]
+        assert not any(isinstance(e, switch_class) for e in entities)
 
     @pytest.mark.asyncio
     async def test_child_lock_not_created_when_absent(
@@ -411,4 +449,165 @@ class TestRobotHotWaterSwitchSwitch:
     async def test_no_command_when_device_none(self, mock_coordinator):
         mock_coordinator.device = None
         entity = DysonRobotHotWaterSwitchSwitch(mock_coordinator)
+        await entity.async_turn_on()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# New boolean switches (alarm, detergent, hot water mop, collect dust)
+# ---------------------------------------------------------------------------
+
+_NEW_SWITCH_CASES = [
+    pytest.param(
+        DysonRobotAlarmSwitch,
+        "robot_alarm",
+        "robot_alarm",
+        "set_robot_alarm",
+        id="alarm",
+    ),
+    pytest.param(
+        DysonRobotDetergentSwitch,
+        "robot_detergent",
+        "robot_detergent",
+        "set_robot_detergent",
+        id="detergent",
+    ),
+    pytest.param(
+        DysonRobotHotWaterMopSwitch,
+        "robot_hot_water_mop",
+        "robot_hot_water_mop",
+        "set_robot_hot_water_mop",
+        id="hot_water_mop",
+    ),
+    pytest.param(
+        DysonRobotCollectDustOnSelfCleanSwitch,
+        "robot_collect_dust_on_self_clean",
+        "robot_collect_dust_on_self_clean",
+        "set_robot_collect_dust_on_self_clean",
+        id="collect_dust_on_self_clean",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "switch_class,unique_id_suffix,device_getter,device_setter", _NEW_SWITCH_CASES
+)
+class TestNewBooleanSwitches:
+    """Shared behavior tests for the four new _DysonRobotBooleanSwitch subclasses."""
+
+    def test_unique_id(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        entity = switch_class(mock_coordinator)
+        assert entity._attr_unique_id == f"RB05-EU-TST0000A_{unique_id_suffix}"
+
+    def test_translation_key(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        entity = switch_class(mock_coordinator)
+        assert entity._attr_translation_key == unique_id_suffix
+
+    def test_is_on_reflects_device_state(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        setattr(mock_coordinator.device, device_getter, True)
+        entity = switch_class(mock_coordinator)
+        assert entity._attr_is_on is True
+
+    def test_handle_update_reflects_new_state(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        entity = switch_class(mock_coordinator)
+        entity.async_write_ha_state = MagicMock()
+        setattr(mock_coordinator.device, device_getter, True)
+        entity._handle_coordinator_update()
+        assert entity._attr_is_on is True
+
+    def test_is_none_when_no_device(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        mock_coordinator.device = None
+        entity = switch_class(mock_coordinator)
+        assert entity._attr_is_on is None
+
+    @pytest.mark.asyncio
+    async def test_turn_on_calls_setter_true(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        setattr(mock_coordinator.device, device_setter, AsyncMock())
+        entity = switch_class(mock_coordinator)
+        await entity.async_turn_on()
+        getattr(mock_coordinator.device, device_setter).assert_awaited_once_with(True)
+
+    @pytest.mark.asyncio
+    async def test_turn_off_calls_setter_false(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        setattr(mock_coordinator.device, device_setter, AsyncMock())
+        entity = switch_class(mock_coordinator)
+        await entity.async_turn_off()
+        getattr(mock_coordinator.device, device_setter).assert_awaited_once_with(False)
+
+    @pytest.mark.asyncio
+    async def test_no_command_when_device_none(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        mock_coordinator.device = None
+        entity = switch_class(mock_coordinator)
+        await entity.async_turn_on()  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_connection_error_logged_not_raised(
+        self,
+        mock_coordinator,
+        switch_class,
+        unique_id_suffix,
+        device_getter,
+        device_setter,
+    ):
+        setattr(
+            mock_coordinator.device,
+            device_setter,
+            AsyncMock(side_effect=ConnectionError()),
+        )
+        entity = switch_class(mock_coordinator)
         await entity.async_turn_on()  # should not raise

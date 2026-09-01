@@ -2017,6 +2017,74 @@ class TestDysonDeviceProperties:
         device_with_state._state_data = {}
         assert device_with_state.robot_voice_download_status is None
 
+    def test_robot_alarm_reported(self, device_with_state):
+        device_with_state._state_data = {"alarm": True}
+        assert device_with_state.robot_alarm is True
+
+    def test_robot_alarm_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_alarm is None
+
+    def test_robot_volume_reported(self, device_with_state):
+        device_with_state._state_data = {"volume": 40}
+        assert device_with_state.robot_volume == 40
+
+    def test_robot_volume_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_volume is None
+
+    def test_robot_full_clean_action_reported(self, device_with_state):
+        device_with_state._state_data = {"fullCleanAction": "VACUUMING"}
+        assert device_with_state.robot_full_clean_action == "VACUUMING"
+
+    def test_robot_full_clean_action_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_full_clean_action is None
+
+    def test_robot_cleaning_state_reported(self, device_with_state):
+        device_with_state._state_data = {"cleaningState": "REMOVING_DIRT"}
+        assert device_with_state.robot_cleaning_state == "REMOVING_DIRT"
+
+    def test_robot_cleaning_state_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_cleaning_state is None
+
+    def test_robot_consumables_reported(self, device_with_state):
+        consumables = [
+            {"type": "brushBar", "usage": 1},
+            {"type": "cleaningSolution", "needsRefill": False},
+        ]
+        device_with_state._state_data = {"consumables": consumables}
+        assert device_with_state.robot_consumables == consumables
+
+    def test_robot_consumables_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_consumables is None
+
+    def test_robot_detergent_reported(self, device_with_state):
+        device_with_state._state_data = {"detergent": True}
+        assert device_with_state.robot_detergent is True
+
+    def test_robot_detergent_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_detergent is None
+
+    def test_robot_hot_water_mop_reported(self, device_with_state):
+        device_with_state._state_data = {"hotWaterMop": True}
+        assert device_with_state.robot_hot_water_mop is True
+
+    def test_robot_hot_water_mop_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_hot_water_mop is None
+
+    def test_robot_collect_dust_on_self_clean_reported(self, device_with_state):
+        device_with_state._state_data = {"collectDustOnSelfClean": False}
+        assert device_with_state.robot_collect_dust_on_self_clean is False
+
+    def test_robot_collect_dust_on_self_clean_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_collect_dust_on_self_clean is None
+
 
 class TestDysonDeviceVoiceDownloadMessageHandling:
     """Test that VOICE-DOWNLOAD-STATUS messages are retained in state."""
@@ -2229,6 +2297,46 @@ class TestDysonDeviceRobotCommands:
         await device_with_state.robot_request_voice_download_status()
         sent = device_with_state._send_robot_command.call_args[0][0]
         assert sent["msg"] == "REQUEST-VOICE-DOWNLOAD-STATUS"
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_set_robot_alarm(self, device_with_state):
+        await device_with_state.set_robot_alarm(True)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["alarm"] is True
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_set_robot_volume(self, device_with_state):
+        await device_with_state.set_robot_volume(40)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["volume"] == 40
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_set_robot_detergent(self, device_with_state):
+        await device_with_state.set_robot_detergent(False)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["detergent"] is False
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_set_robot_hot_water_mop(self, device_with_state):
+        await device_with_state.set_robot_hot_water_mop(True)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["hotWaterMop"] is True
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_set_robot_collect_dust_on_self_clean(self, device_with_state):
+        await device_with_state.set_robot_collect_dust_on_self_clean(True)
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "STATE-SET"
+        assert sent["collectDustOnSelfClean"] is True
         assert sent["mode-reason"] == "RAPP"
 
 

@@ -1516,6 +1516,23 @@ async def async_setup_entry(  # noqa: C901
             # select.py.
             if coordinator.data and "backWashFrequency" in coordinator.data:
                 entities.append(DysonRobotBackWashFrequencySensor(coordinator))
+            if coordinator.data and "fullCleanAction" in coordinator.data:
+                entities.append(DysonRobotFullCleanActionSensor(coordinator))
+            if coordinator.data and "cleaningState" in coordinator.data:
+                entities.append(DysonRobotCleaningStateSensor(coordinator))
+            # One sensor per part type actually reported in consumables[]
+            # rather than a hardcoded list, so this adapts if a robot
+            # model reports a different set of parts.
+            consumables = (
+                coordinator.data.get("consumables") if coordinator.data else None
+            )
+            if isinstance(consumables, list):
+                for entry in consumables:
+                    part_type = entry.get("type") if isinstance(entry, dict) else None
+                    if part_type:
+                        entities.append(
+                            DysonRobotConsumableSensor(coordinator, part_type)
+                        )
             # Voice download status has no CURRENT-STATE key of its own to
             # gate on (it's pushed independently) — create unconditionally
             # for robot devices, stays unavailable until the first
@@ -3424,6 +3441,135 @@ class DysonRobotVoiceDownloadStatusSensor(DysonEntity, SensorEntity):
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error updating robot voice download status sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+            self._attr_extra_state_attributes = {}
+        super()._handle_coordinator_update()
+
+
+class DysonRobotFullCleanActionSensor(DysonEntity, SensorEntity):
+    """Robot's current clean action (vacuuming/mopping/none).
+
+    Three values observed across probe captures: ``NONE``, ``VACUUMING``,
+    ``VACUUMING_AND_MOPPING``. Read-only status — no write ever attempted
+    or observed, likely derived from ``currentCleaningMode``/device
+    capabilities.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the full-clean action sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_full_clean_action"
+        self._attr_translation_key = "robot_full_clean_action"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:robot-vacuum"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            self._attr_native_value = device.robot_full_clean_action if device else None
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot full-clean action sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+        super()._handle_coordinator_update()
+
+
+class DysonRobotCleaningStateSensor(DysonEntity, SensorEntity):
+    """Robot's finer-grained cleaning sub-state.
+
+    Two values observed across probe captures: ``NOT_CLEANING``,
+    ``REMOVING_DIRT`` — distinct from the main ``state``/``robot_state``
+    field. Read-only status — no write ever attempted or observed.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the cleaning state sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_cleaning_state"
+        self._attr_translation_key = "robot_cleaning_state"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:robot-vacuum-variant"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            self._attr_native_value = device.robot_cleaning_state if device else None
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot cleaning state sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+        super()._handle_coordinator_update()
+
+
+class DysonRobotConsumableSensor(DysonEntity, SensorEntity):
+    """Per-part consumable usage for robot vacuums.
+
+    One entity per ``consumables[]`` entry type (``brushBar``,
+    ``mopRoller``, ``sideBrushes``, ``robotFilter``, ``dockFilter``,
+    ``ioniserCartridge``, ``cleaningSolution``). ``usage``'s unit/scale is
+    unconfirmed — values never changed within either probe capture, so
+    there's no before/after to derive a scale from; exposed as a raw
+    diagnostic integer. ``cleaningSolution`` has a different shape
+    (``needsRefill: bool``, no ``usage`` key) and is surfaced as an
+    extra state attribute rather than the main value for that one type.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator, part_type: str) -> None:
+        """Initialize the consumable sensor for one part type."""
+        super().__init__(coordinator)
+        self._part_type = part_type
+        self._attr_unique_id = (
+            f"{coordinator.serial_number}_robot_consumable_{part_type.lower()}"
+        )
+        self._attr_translation_key = "robot_consumable"
+        self._attr_translation_placeholders = {"part": part_type}
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:recycle"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            consumables = device.robot_consumables if device else None
+            entry = None
+            if consumables:
+                entry = next(
+                    (c for c in consumables if c.get("type") == self._part_type),
+                    None,
+                )
+            if entry is None:
+                self._attr_native_value = None
+                self._attr_extra_state_attributes = {}
+            elif "usage" in entry:
+                self._attr_native_value = entry.get("usage")
+                self._attr_extra_state_attributes = {}
+            else:
+                # cleaningSolution shape: no usage, has needsRefill instead.
+                self._attr_native_value = None
+                self._attr_extra_state_attributes = {
+                    "needs_refill": entry.get("needsRefill"),
+                }
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot consumable (%s) sensor for device %s: %s",
+                self._part_type,
                 self.coordinator.serial_number,
                 err,
             )
