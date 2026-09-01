@@ -4125,17 +4125,13 @@ class DysonDevice:
     async def set_robot_child_lock(self, enabled: bool) -> None:
         """Set the robot's child lock on/off.
 
-        PARTIALLY VERIFIED (1 sep 2026 probe, ``run-6-probe.log``): the
-        STATE-SET command *shape* is confirmed — the app sent
-        ``{"msg":"STATE-SET","backWashType":"ROOM","time":"...",
-        "mode-reason":"RAPP"}`` and
-        ``{"doNotDisturbMode":{...},"mode-reason":"RAPP","msg":"STATE-SET",
-        "time":"..."}`` for other fields: the changed key sits top-level
-        alongside ``msg``/``time``/``mode-reason``, with no ``data``
-        wrapper — unlike this method's earlier (wrong) guess. ``childLock``
-        itself was not toggled during that capture, so the field name/value
-        pairing for this specific key is still unconfirmed, only the
-        envelope shape.
+        VERIFIED (1 sep 2026, live against a real RB05 via the deployed
+        Home Assistant integration): calling this via
+        ``switch.dyson_7vs_eu_una6126a_child_lock`` sent
+        ``{"msg": "STATE-SET", "childLock": true, "time": "...",
+        "mode-reason": "RAPP"}`` and the robot's own state (confirmed via
+        the switch's ``last_changed`` timestamp) reflected the change
+        within seconds.
         """
         await self._send_robot_command(
             {
