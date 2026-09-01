@@ -466,7 +466,7 @@ class TestFetchMapImage:
 
         cache = TTLCache(3600)
         png = b"\x89PNG cached"
-        cache.set("VS9-GB-HJA0000A:map-99", png)
+        cache.set("mv:VS9-GB-HJA0000A:map-99", png)
 
         with patch.object(image_module, "_map_image_cache", cache):
             result = await image_module._fetch_map_image(mock_coordinator, "map-99")
@@ -530,7 +530,7 @@ class TestFetchMapImage:
             result = await image_module._fetch_map_image(mock_coordinator, "map-99")
 
         assert result is png
-        assert cache.get("VS9-GB-HJA0000A:map-99") is png
+        assert cache.get("mv:VS9-GB-HJA0000A:map-99") is png
 
     @pytest.mark.asyncio
     async def test_miss_is_cached_as_sentinel(self, mock_coordinator):
@@ -574,7 +574,7 @@ class TestFetchCleanMapDataImage:
 
         cache = TTLCache(3600)
         png = b"\x89PNG cached"
-        cache.set("VS9-GB-HJA0000A:clean-42", png)
+        cache.set("cmd:VS9-GB-HJA0000A:clean-42", png)
 
         with patch.object(image_module, "_map_image_cache", cache):
             result = await image_module._fetch_clean_map_data_image(
@@ -588,7 +588,7 @@ class TestFetchCleanMapDataImage:
         from custom_components.hass_dyson.coordinator import TTLCache
 
         cache = TTLCache(3600)
-        cache.set("VS9-GB-HJA0000A:clean-42", b"")
+        cache.set("cmd:VS9-GB-HJA0000A:clean-42", b"")
 
         @asynccontextmanager
         async def null_client():
@@ -642,7 +642,7 @@ class TestFetchCleanMapDataImage:
             )
 
         assert result is None
-        assert cache.get("VS9-GB-HJA0000A:clean-42") == b""
+        assert cache.get("cmd:VS9-GB-HJA0000A:clean-42") == b""
 
     @pytest.mark.asyncio
     async def test_empty_response_returns_none_and_caches_sentinel(
@@ -667,7 +667,7 @@ class TestFetchCleanMapDataImage:
             )
 
         assert result is None
-        assert cache.get("VS9-GB-HJA0000A:clean-42") == b""
+        assert cache.get("cmd:VS9-GB-HJA0000A:clean-42") == b""
 
     @pytest.mark.asyncio
     async def test_renderable_response_returns_png(self, mock_coordinator):
@@ -692,7 +692,7 @@ class TestFetchCleanMapDataImage:
 
         assert result is not None
         assert result[:4] == b"\x89PNG"
-        assert cache.get("VS9-GB-HJA0000A:clean-42") == result
+        assert cache.get("cmd:VS9-GB-HJA0000A:clean-42") == result
 
     @pytest.mark.asyncio
     async def test_non_renderable_response_returns_none(self, mock_coordinator):
@@ -716,7 +716,7 @@ class TestFetchCleanMapDataImage:
             )
 
         assert result is None
-        assert cache.get("VS9-GB-HJA0000A:clean-42") == b""
+        assert cache.get("cmd:VS9-GB-HJA0000A:clean-42") == b""
 
     @pytest.mark.asyncio
     async def test_v2_format_response_renders_png(self, mock_coordinator):
@@ -755,7 +755,7 @@ class TestFetchCleanMapDataImage:
 
         assert result is not None
         assert result[:4] == b"\x89PNG"
-        assert cache.get("VS9-GB-HJA0000A:clean-42") == result
+        assert cache.get("cmd:VS9-GB-HJA0000A:clean-42") == result
 
 
 # ---------------------------------------------------------------------------

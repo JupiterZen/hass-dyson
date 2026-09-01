@@ -139,7 +139,16 @@ async def _fetch_map_image(
     """
     from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
 
-    key = f"{coordinator.serial_number}:{map_id}"
+    # "mv:" prefix — _fetch_map_image and _fetch_clean_map_data_image are
+    # two independent API strategies tried against the same clean_id (see
+    # DysonDustMapImage._build's v2 path), but shared the same bare
+    # f"{serial}:{clean_id}" key before this fix. Strategy 1 (this
+    # function, always a 404 on RB05/v2 devices) would cache a b""
+    # sentinel that strategy 2 then read as "already tried", skipping its
+    # own — possibly successful — API call entirely. Discovered 1 sep
+    # 2026: the dust map was permanently broken for RB05 because of this,
+    # not because clean-maps-data genuinely has no data.
+    key = f"mv:{coordinator.serial_number}:{map_id}"
     cached = _map_image_cache.get(key)
     if cached is not None:
         # b"" sentinel means a previous call confirmed no image is available.
@@ -179,13 +188,13 @@ async def _fetch_clean_map_data_image(
     (``width``, ``height``, ``dustData`` keys) it is rendered to a PNG with
     the existing ``_render_dust_map_png`` helper.
 
-    Results are cached in ``_map_image_cache`` under the ``clean_id`` key
-    (shared with ``_fetch_map_image``).  A ``b""`` sentinel is stored on
-    failure to suppress repeated API calls within the TTL.
+    Results are cached in ``_map_image_cache`` under a ``"cmd:"``-prefixed
+    key — see ``_fetch_map_image``'s docstring for why this must not share
+    a bare key with that function's ``"mv:"`` cache entries.
     """
     from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
 
-    key = f"{coordinator.serial_number}:{clean_id}"
+    key = f"cmd:{coordinator.serial_number}:{clean_id}"
     # If a previous attempt already succeeded (or confirmed no image), reuse it.
     cached = _map_image_cache.get(key)
     if cached is not None:
