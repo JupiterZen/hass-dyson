@@ -1516,6 +1516,11 @@ async def async_setup_entry(  # noqa: C901
             # select.py.
             if coordinator.data and "backWashFrequency" in coordinator.data:
                 entities.append(DysonRobotBackWashFrequencySensor(coordinator))
+            # Voice download status has no CURRENT-STATE key of its own to
+            # gate on (it's pushed independently) — create unconditionally
+            # for robot devices, stays unavailable until the first
+            # VOICE-DOWNLOAD-STATUS message arrives.
+            entities.append(DysonRobotVoiceDownloadStatusSensor(coordinator))
             # Cloud-fetched cleaning history + Dyson's recommended-next-room
             # sensor. Both gated on cloud auth.
             if coordinator.config_entry.data.get("auth_token"):
@@ -3366,6 +3371,64 @@ class DysonRobotBackWashFrequencySensor(DysonEntity, SensorEntity):
                 err,
             )
             self._attr_native_value = None
+        super()._handle_coordinator_update()
+
+
+class DysonRobotVoiceDownloadStatusSensor(DysonEntity, SensorEntity):
+    """Progress of a robot voice-language pack download/install.
+
+    VERIFIED 1 sep 2026 (run-6-probe.log): changing the voice language is
+    an async flow — ``SET-VOICE-LANGUAGE`` starts a background download,
+    and the robot pushes ``VOICE-DOWNLOAD-STATUS`` messages
+    (``downloading`` → ``install_complete``) while it runs. This sensor
+    surfaces that state; ``progress``/``language`` are extra state
+    attributes rather than the main value, since ``state`` is the more
+    useful at-a-glance signal.
+
+    Availability:
+        None until the robot has sent its first VOICE-DOWNLOAD-STATUS
+        message — this device never sends one unprompted, only in
+        response to a language change or an explicit
+        REQUEST-VOICE-DOWNLOAD-STATUS poll. Not gated in
+        ``async_setup_entry`` on a CURRENT-STATE key (there is none for
+        this), unlike the other robot sensors — created for all robot
+        devices, stays unavailable until the first message arrives.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the voice download status sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.serial_number}_robot_voice_download_status"
+        )
+        self._attr_translation_key = "robot_voice_download_status"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:download"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            status = device.robot_voice_download_status if device else None
+            if not status:
+                self._attr_native_value = None
+                self._attr_extra_state_attributes = {}
+            else:
+                self._attr_native_value = status.get("state")
+                self._attr_extra_state_attributes = {
+                    "language": status.get("language"),
+                    "progress": status.get("progress"),
+                }
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot voice download status sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+            self._attr_extra_state_attributes = {}
         super()._handle_coordinator_update()
 
 

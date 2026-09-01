@@ -258,11 +258,8 @@
       "robot_back_wash_frequency": {
         "name": "Back Wash Frequency"
       },
-      "robot_back_wash_time": {
-        "name": "Back Wash Time"
-      },
-      "robot_back_wash_type": {
-        "name": "Back Wash Type"
+      "robot_voice_download_status": {
+        "name": "Voice Download Status"
       },
       "dominant_pollutant": {
         "name": "Dominant Pollutant"
@@ -368,6 +365,9 @@
       },
       "robot_self_clean_interval": {
         "name": "Self-Clean Interval"
+      },
+      "robot_voice_language": {
+        "name": "Voice Language"
       }
     },
     "number": {

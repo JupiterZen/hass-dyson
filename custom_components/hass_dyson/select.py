@@ -7,6 +7,7 @@ from typing import Any
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -82,6 +83,11 @@ async def async_setup_entry(
         # elsewhere in this integration for the same field family).
         if coordinator.data and "backWashType" in coordinator.data:
             entities.append(DysonRobotSelfCleanIntervalSelect(coordinator))
+
+        # Voice language — only for docks that have reported voiceLanguage
+        # at least once.
+        if coordinator.data and "voiceLanguage" in coordinator.data:
+            entities.append(DysonRobotVoiceLanguageSelect(coordinator))
 
     # Add tilt oscillation select for ec devices that report the oton key in state.
     # These devices (e.g. BP04) have no dedicated capability flag; presence of oton
@@ -1340,6 +1346,86 @@ class DysonRobotSelfCleanIntervalSelect(DysonEntity, SelectEntity):
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error setting self-clean interval to '%s' for %s: %s",
+                option,
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonRobotVoiceLanguageSelect(DysonEntity, SelectEntity):
+    """Select entity for the robot's voice language.
+
+    Only ``ja-JP`` and ``en-US`` have ever been observed (1 sep 2026
+    probe capture) — the options list here is almost certainly
+    incomplete (Dyson likely supports many more locales), but no broader
+    list has been confirmed. Selecting an option starts an async
+    download/install rather than an immediate change — see
+    :meth:`DysonDevice.set_robot_voice_language` and
+    ``sensor.robot_voice_download_status`` for the progress readout.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    #: Deliberately incomplete — see class docstring.
+    _KNOWN_LANGUAGES = ["ja-JP", "en-US"]
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the voice language select."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_voice_language"
+        self._attr_translation_key = "robot_voice_language"
+        self._attr_icon = "mdi:translate"
+        self._attr_entity_category = EntityCategory.CONFIG
+        current = (
+            coordinator.device.robot_voice_language if coordinator.device else None
+        )
+        # Always include the device's own current value even if it's
+        # outside the known list, so the UI never shows a current_option
+        # that isn't in options.
+        self._attr_options = list(self._KNOWN_LANGUAGES)
+        if current and current not in self._attr_options:
+            self._attr_options.append(current)
+        self._attr_current_option = current
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        current = (
+            self.coordinator.device.robot_voice_language
+            if self.coordinator.device
+            else None
+        )
+        if current and current not in self._attr_options:
+            self._attr_options.append(current)
+        self._attr_current_option = current
+        super()._handle_coordinator_update()
+
+    async def async_select_option(self, option: str) -> None:
+        """Start downloading/installing the selected voice language.
+
+        Does not wait for the download to finish — the entity's
+        current_option stays at the old value until CURRENT-STATE
+        reflects the change (see sensor.robot_voice_download_status for
+        progress).
+        """
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_voice_language(option)
+            _LOGGER.debug(
+                "Started voice language change to '%s' for %s",
+                option,
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error starting voice language change to '%s' for %s: %s",
+                option,
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error starting voice language change to '%s' for %s: %s",
                 option,
                 self.coordinator.serial_number,
                 err,

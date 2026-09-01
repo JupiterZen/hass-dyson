@@ -2000,6 +2000,72 @@ class TestDysonDeviceProperties:
         device_with_state._state_data = {}
         assert device_with_state.robot_air_dry_frequency is None
 
+    def test_robot_voice_language_reported(self, device_with_state):
+        device_with_state._state_data = {"voiceLanguage": "en-US"}
+        assert device_with_state.robot_voice_language == "en-US"
+
+    def test_robot_voice_language_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_voice_language is None
+
+    def test_robot_voice_download_status_reported(self, device_with_state):
+        status = {"state": "downloading", "language": "en-US", "progress": 60}
+        device_with_state._state_data = {"voiceDownloadStatus": status}
+        assert device_with_state.robot_voice_download_status == status
+
+    def test_robot_voice_download_status_missing(self, device_with_state):
+        device_with_state._state_data = {}
+        assert device_with_state.robot_voice_download_status is None
+
+
+class TestDysonDeviceVoiceDownloadMessageHandling:
+    """Test that VOICE-DOWNLOAD-STATUS messages are retained in state."""
+
+    @pytest.fixture
+    def device_with_state(self, mock_hass):
+        return DysonDevice(
+            hass=mock_hass,
+            serial_number="PROP123",
+            host="192.168.1.100",
+            credential="test_cred",
+        )
+
+    def test_voice_download_status_message_is_stored(self, device_with_state):
+        message = {
+            "msg": "VOICE-DOWNLOAD-STATUS",
+            "time": "2026-09-01T10:45:28.244Z",
+            "state": "downloading",
+            "language": "en-US",
+            "progress": 60,
+        }
+        device_with_state._process_message_data(message, "status")
+        assert device_with_state.robot_voice_download_status == message
+
+    def test_voice_download_status_updates_on_subsequent_messages(
+        self, device_with_state
+    ):
+        device_with_state._process_message_data(
+            {
+                "msg": "VOICE-DOWNLOAD-STATUS",
+                "state": "downloading",
+                "language": "en-US",
+                "progress": 0,
+            },
+            "status",
+        )
+        device_with_state._process_message_data(
+            {
+                "msg": "VOICE-DOWNLOAD-STATUS",
+                "state": "install_complete",
+                "language": "en-US",
+                "progress": 100,
+            },
+            "status",
+        )
+        assert device_with_state.robot_voice_download_status["state"] == (
+            "install_complete"
+        )
+
 
 class TestDysonDeviceRobotCommands:
     """Test the robot STATE-SET write methods.
@@ -2147,6 +2213,22 @@ class TestDysonDeviceRobotCommands:
         sent = device_with_state._send_robot_command.call_args[0][0]
         assert sent["msg"] == "STATE-SET"
         assert sent["airDryFrequency"] == 5
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_set_robot_voice_language(self, device_with_state):
+        """Voice language uses its own msg shape, not STATE-SET."""
+        await device_with_state.set_robot_voice_language("en-US")
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "SET-VOICE-LANGUAGE"
+        assert sent["language"] == "en-US"
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_robot_request_voice_download_status(self, device_with_state):
+        await device_with_state.robot_request_voice_download_status()
+        sent = device_with_state._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "REQUEST-VOICE-DOWNLOAD-STATUS"
         assert sent["mode-reason"] == "RAPP"
 
 

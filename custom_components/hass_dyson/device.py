@@ -1559,6 +1559,18 @@ class DysonDevice:
             # update). Payload is only {msg, time} — no state to merge;
             # consumers react via the message callbacks below.
             _LOGGER.debug("Persistent-map manifest updated for %s", self._log_serial)
+        elif message_type == "VOICE-DOWNLOAD-STATUS":
+            # Progress of a voice-language pack download/install, triggered
+            # by SET-VOICE-LANGUAGE and polled via
+            # REQUEST-VOICE-DOWNLOAD-STATUS. Payload:
+            # {"msg","time","state":"downloading"|"install_complete",
+            # "language","progress"}. Retained as its own top-level key —
+            # not merged into the CURRENT-STATE-derived fields — since it
+            # has its own independent lifecycle (voiceLanguage in
+            # CURRENT-STATE only updates once state reaches
+            # install_complete).
+            _LOGGER.debug("Voice download status for %s: %s", self._log_serial, data)
+            self._state_data["voiceDownloadStatus"] = data
         else:
             _LOGGER.debug(
                 "Unknown message type '%s' for device %s: %s",
@@ -3124,6 +3136,45 @@ class DysonDevice:
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
     @property
+    def robot_voice_language(self) -> str | None:
+        """Return the robot's active voice language, if reported.
+
+        ``voiceLanguage`` in CURRENT-STATE only updates once a
+        :meth:`set_robot_voice_language` request's download/install
+        completes (see :attr:`robot_voice_download_status`) — it does not
+        reflect an in-progress change. Only ever seen in CURRENT-STATE,
+        never STATE-CHANGE.
+        """
+        value = self._state_data.get("voiceLanguage")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def robot_voice_download_status(self) -> dict | None:
+        """Return the latest voice-language download/install progress, if any.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): a language change is a
+        three-step async flow, not a single write —
+        ``SET-VOICE-LANGUAGE`` (see :meth:`set_robot_voice_language`)
+        starts a background download; ``REQUEST-VOICE-DOWNLOAD-STATUS``
+        polls it; the robot answers with ``VOICE-DOWNLOAD-STATUS``
+        messages (``{"state": "downloading"|"install_complete",
+        "language", "progress"}``) until ``install_complete``, at which
+        point (and only then) :attr:`robot_voice_language` updates in the
+        next CURRENT-STATE. None until the first such message is seen —
+        this device never sends it unprompted.
+
+        An older, structurally different ``CHANGE-VOICE-LANGUAGE`` command
+        (``{"voiceLanguageType": <int>, "voiceLanguagePackageMd5": <str>}``,
+        no ``language`` string) was also observed once, on a 29 aug 2026
+        capture — likely an older app/firmware pairing. Not implemented;
+        :meth:`set_robot_voice_language` only targets the newer
+        ``SET-VOICE-LANGUAGE`` shape confirmed against this robot's
+        current firmware.
+        """
+        value = self._state_data.get("voiceDownloadStatus")
+        return value if isinstance(value, dict) else None
+
+    @property
     def robot_last_clean_zones(self) -> list[str]:
         """Zones targeted by the current/most recent MQTT-commanded clean.
 
@@ -4093,6 +4144,50 @@ class DysonDevice:
             {
                 "msg": "STATE-SET",
                 "airDryFrequency": hours,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def set_robot_voice_language(self, language: str) -> None:
+        """Start a voice-language pack download/install.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): the app sent
+        ``{"language":"en-US","msg":"SET-VOICE-LANGUAGE","time":"...",
+        "mode-reason":"RAPP"}``, which triggered a background download —
+        this call does NOT change :attr:`robot_voice_language`
+        immediately. Poll with :meth:`robot_request_voice_download_status`
+        (or wait for the robot's own ``VOICE-DOWNLOAD-STATUS`` pushes)
+        until ``state`` reaches ``install_complete``; only then does the
+        robot's next CURRENT-STATE reflect the new
+        :attr:`robot_voice_language`. Uses a different message shape
+        (``msg`` itself, not STATE-SET, and no ``mode-reason``-adjacent
+        ``data`` key) — unlike every other ``set_robot_*`` method — because
+        that's the shape actually captured for this command; do not
+        "correct" it to match the STATE-SET pattern.
+        """
+        await self._send_robot_command(
+            {
+                "msg": "SET-VOICE-LANGUAGE",
+                "language": language,
+                "time": self._get_command_timestamp(),
+                "mode-reason": "RAPP",
+            }
+        )
+
+    async def robot_request_voice_download_status(self) -> None:
+        """Request the current voice-language download/install progress.
+
+        VERIFIED 1 sep 2026 (run-6-probe.log): the app polled with
+        ``{"msg":"REQUEST-VOICE-DOWNLOAD-STATUS","mode-reason":"RAPP",
+        "time":"..."}`` roughly once a second while a download was in
+        progress; the robot answered each time with a
+        ``VOICE-DOWNLOAD-STATUS`` push (see
+        :attr:`robot_voice_download_status`).
+        """
+        await self._send_robot_command(
+            {
+                "msg": "REQUEST-VOICE-DOWNLOAD-STATUS",
                 "time": self._get_command_timestamp(),
                 "mode-reason": "RAPP",
             }

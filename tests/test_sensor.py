@@ -221,6 +221,29 @@ class TestSensorPlatformSetup:
         sensor_types = [type(entity).__name__ for entity in entities]
         assert "DysonRobotBackWashFrequencySensor" not in sensor_types
 
+    @pytest.mark.asyncio
+    async def test_async_setup_entry_always_creates_voice_download_status_for_robot(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        """No CURRENT-STATE key to gate on — created unconditionally for robots."""
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {}
+
+        result = await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        assert result is True
+        entities = mock_add_entities.call_args[0][0]
+        sensor_types = [type(entity).__name__ for entity in entities]
+        assert "DysonRobotVoiceDownloadStatusSensor" in sensor_types
+
 
 class TestDysonPM25Sensor:
     """Test DysonPM25Sensor using pure pytest."""
@@ -1283,6 +1306,75 @@ class TestDysonRobotBackWashSensors:
         )
 
         sensor = DysonRobotBackWashFrequencySensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+        pure_mock_coordinator.device = None
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+
+
+class TestDysonRobotVoiceDownloadStatusSensor:
+    """Test DysonRobotVoiceDownloadStatusSensor using pure pytest."""
+
+    def test_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotVoiceDownloadStatusSensor,
+        )
+
+        sensor = DysonRobotVoiceDownloadStatusSensor(pure_mock_coordinator)
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_voice_download_status"
+        )
+        assert sensor._attr_translation_key == "robot_voice_download_status"
+
+    def test_sensor_update_downloading(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotVoiceDownloadStatusSensor,
+        )
+
+        pure_mock_coordinator.device.robot_voice_download_status = {
+            "state": "downloading",
+            "language": "en-US",
+            "progress": 60,
+        }
+        sensor = DysonRobotVoiceDownloadStatusSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "downloading"
+        assert sensor._attr_extra_state_attributes == {
+            "language": "en-US",
+            "progress": 60,
+        }
+
+    def test_sensor_update_none_before_first_message(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotVoiceDownloadStatusSensor,
+        )
+
+        pure_mock_coordinator.device.robot_voice_download_status = None
+        sensor = DysonRobotVoiceDownloadStatusSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+        assert sensor._attr_extra_state_attributes == {}
+
+    def test_sensor_device_unavailable(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotVoiceDownloadStatusSensor,
+        )
+
+        sensor = DysonRobotVoiceDownloadStatusSensor(pure_mock_coordinator)
         sensor.hass = pure_mock_hass
         pure_mock_coordinator.device = None
 
