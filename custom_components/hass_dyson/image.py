@@ -40,17 +40,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import logging
 import zlib
 from datetime import datetime, timezone
 from functools import partial
 
 from homeassistant.components.image import ImageEntity
+from homeassistant.components.vacuum import VacuumActivity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DEVICE_CATEGORY_ROBOT, DOMAIN
+from .const import DEVICE_CATEGORY_ROBOT, DOMAIN, ROBOT_STATE_TO_HA_STATE
 from .coordinator import DysonDataUpdateCoordinator, TTLCache
 from .entity import DysonEntity
 from .vacuum import fetch_clean_maps
@@ -253,22 +255,28 @@ async def _fetch_clean_map_data_image(
     return None
 
 
-async def _fetch_v2_floor_plan_image(
+async def _fetch_v2_floor_plan_data(
     coordinator: DysonDataUpdateCoordinator, clean_id: str
-) -> bytes | None:
-    """Render a v2 floor plan from the clean-maps-data endpoint.
+) -> dict | None:
+    """Fetch the v2 clean-maps-data response used to render a floor plan.
 
-    Calls ``GET /v2/{serial}/clean-maps-data/{cleanId}`` and renders the zone
-    boundary lines via ``_render_v2_floor_plan_png``.  Results are cached in
-    ``_floor_plan_cache`` with a 6-hour TTL (floor plans change infrequently).
-    A ``b""`` sentinel is stored on failure to suppress repeated API calls.
+    Calls ``GET /v2/{serial}/clean-maps-data/{cleanId}``. Results are cached
+    in ``_floor_plan_cache`` with a 6-hour TTL (the zone geometry and dock
+    location change infrequently). A ``b""`` sentinel is stored on failure to
+    suppress repeated API calls.
+
+    Deliberately returns the raw response rather than a rendered PNG — the
+    caller (``DysonFloorPlanImage._build``) overlays the robot's live
+    position on top of this data on every call, so the *rendered image*
+    must never be cached: caching the PNG here would freeze the robot dot
+    at wherever it was on the first render for the full 6-hour TTL.
     """
     from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
 
     key = f"{coordinator.serial_number}:fp:{clean_id}"
     cached = _floor_plan_cache.get(key)
     if cached is not None:
-        return cached if cached else None
+        return json.loads(cached) if cached else None
 
     async with coordinator.async_cloud_client() as client:
         if client is None:
@@ -289,10 +297,8 @@ async def _fetch_v2_floor_plan_image(
         _floor_plan_cache.set(key, b"")
         return None
 
-    rotation = int(data.get("orientation") or 0)
-    png = _render_v2_floor_plan_png(data, rotation)
-    _floor_plan_cache.set(key, png if png else b"")
-    return png
+    _floor_plan_cache.set(key, json.dumps(data).encode())
+    return data
 
 
 async def _fetch_persist_map(coordinator: DysonDataUpdateCoordinator, map_id: str):
@@ -648,7 +654,11 @@ def _render_v2_map_png(data: dict, rotation_deg: int = 0) -> bytes | None:
     return buf.getvalue()
 
 
-def _render_v2_floor_plan_png(data: dict, rotation_deg: int = 0) -> bytes | None:
+def _render_v2_floor_plan_png(
+    data: dict,
+    rotation_deg: int = 0,
+    robot_position: tuple[float, float, float | None] | None = None,
+) -> bytes | None:
     """Render zone boundary lines from a v2 clean-maps-data response as a floor plan PNG.
 
     Uses the same response as ``_render_v2_map_png`` (``GET /v2/{serial}/clean-maps-data/
@@ -674,6 +684,13 @@ def _render_v2_floor_plan_png(data: dict, rotation_deg: int = 0) -> bytes | None
           "dockLocation": {"x": float, "y": float, "angle": float},
           "orientation": int
         }
+
+    ``robot_position``, when given, is ``(x, y, angle)`` in the same world
+    metres as ``dockLocation`` — the robot's most recent ``globalPosition``
+    pose from a live ``CURRENT-STATE`` MQTT message (see
+    ``DysonDevice.robot_global_position``/``robot_global_angle``). Drawn as a
+    blue dot with a heading tick so the floor plan shows where the robot
+    currently is during an active clean, not just the static zone layout.
     """
     try:
         from PIL import Image, ImageDraw
@@ -741,8 +758,32 @@ def _render_v2_floor_plan_png(data: dict, rotation_deg: int = 0) -> bytes | None
                 outline=(0, 120, 40, 255),
             )
 
-        if not has_lines and not has_dock:
-            _LOGGER.debug("v2 floor plan: no zones or dock location in response")
+        # Robot's current position — blue dot with a heading tick, drawn last
+        # so it sits on top of the zone lines and dock marker.
+        has_robot = robot_position is not None
+        if robot_position is not None:
+            rx, ry, angle = robot_position
+            px, py = _world_to_px(rx, ry)
+            draw.ellipse(
+                [px - 6, py - 6, px + 6, py + 6],
+                fill=(30, 100, 240, 255),
+                outline=(10, 50, 150, 255),
+            )
+            if angle is not None:
+                # Heading tick: short line from centre in the facing direction.
+                # World angle is radians, image Y grows downward — negate for
+                # the on-screen rotation to match world convention.
+                import math
+
+                tick_len = 10
+                tx = px + tick_len * math.cos(angle)
+                ty = py - tick_len * math.sin(angle)
+                draw.line([px, py, tx, ty], fill=(10, 50, 150, 255), width=2)
+
+        if not has_lines and not has_dock and not has_robot:
+            _LOGGER.debug(
+                "v2 floor plan: no zones, dock location, or robot position in response"
+            )
             return None
 
     except Exception as err:  # noqa: BLE001
@@ -1015,9 +1056,35 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
                 self.coordinator.serial_number,
                 pmap_id,
             )
+            # Robot's live position, if it's actively cleaning right now —
+            # see DysonDevice.robot_global_position for the message format.
+            # Never part of the cache key/short-circuit below: a moving robot
+            # must re-render on every poll, not freeze at its first position.
+            # Uses the same ROBOT_STATE_TO_HA_STATE mapping as vacuum.activity
+            # rather than the raw cleaningState field, which only distinguishes
+            # NOT_CLEANING/REMOVING_DIRT and isn't a reliable "is moving" signal.
+            robot_pos = None
+            device = self.coordinator.device
+            if device is not None:
+                robot_state = device.robot_state
+                ha_activity = ROBOT_STATE_TO_HA_STATE.get(robot_state)
+                if ha_activity == VacuumActivity.CLEANING:
+                    pos = device.robot_global_position
+                    if pos is not None:
+                        robot_pos = (pos[0], pos[1], device.robot_global_angle)
+
             render_key = ("v2fp", pmap_id, cleans[0].clean_id)
-            if render_key == self._render_cache_key and self._cached_png:
+            if (
+                robot_pos is None
+                and render_key == self._render_cache_key
+                and self._cached_png
+            ):
                 return self._cached_png
+            # Map Visualizer PNGs are server-rendered bitmaps — there's no
+            # way to overlay a robot marker on them client-side, so the live
+            # position only ever appears via the v2 zone-boundary renderer
+            # below. Not a gap in practice: this API 404s for every v2
+            # device (RB05 included), so v2 devices always fall through.
             png = await _fetch_map_image(self.coordinator, pmap_id)
             if png is None:
                 _LOGGER.debug(
@@ -1027,11 +1094,20 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
                     pmap_id,
                 )
                 # v2 devices (e.g. RB05): no pre-rendered floor plan bitmap
-                # exists anywhere.  Render the zone boundary lines from the
-                # most recent clean-maps-data response instead.
+                # exists anywhere.  Render the zone boundary lines (plus the
+                # robot's live position, if cleaning) from the most recent
+                # clean-maps-data response instead.
                 clean_id = cleans[0].clean_id
+                png = None
                 if clean_id:
-                    png = await _fetch_v2_floor_plan_image(self.coordinator, clean_id)
+                    fp_data = await _fetch_v2_floor_plan_data(
+                        self.coordinator, clean_id
+                    )
+                    if fp_data:
+                        rotation = int(fp_data.get("orientation") or 0)
+                        png = _render_v2_floor_plan_png(
+                            fp_data, rotation, robot_position=robot_pos
+                        )
                 if png is None:
                     _LOGGER.debug(
                         "Floor plan for %s: no floor plan image available for"
@@ -1041,8 +1117,13 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
                         pmap_id,
                     )
                     return None
-            self._render_cache_key = render_key
-            self._cached_png = png
+            # Don't persist a robot-position render into the entity cache —
+            # otherwise the next poll's cache-key match (pmap_id/clean_id
+            # unchanged) would return this frame forever once the robot
+            # stops cleaning and robot_pos goes back to None.
+            if robot_pos is None:
+                self._render_cache_key = render_key
+                self._cached_png = png
             self._attr_image_last_updated = datetime.now(timezone.utc)
             return png
 

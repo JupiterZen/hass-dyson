@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import builtins
 import io
+import json
 import zlib
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -763,12 +764,19 @@ class TestFetchCleanMapDataImage:
 # ---------------------------------------------------------------------------
 
 
-class TestFetchV2FloorPlanImage:
-    """Tests for the v2 zone-boundary floor plan fetch helper."""
+class TestFetchV2FloorPlanData:
+    """Tests for the v2 zone-boundary floor plan data fetch helper.
+
+    Renamed from ``_fetch_v2_floor_plan_image`` — the helper now returns the
+    raw clean-maps-data dict rather than a rendered PNG, so the caller can
+    overlay the robot's live position on every render without the PNG
+    itself being frozen in the 6-hour cache (see _fetch_v2_floor_plan_data's
+    docstring).
+    """
 
     @pytest.mark.asyncio
-    async def test_valid_response_renders_and_caches(self, mock_coordinator):
-        """Valid zone-boundary response is rendered and cached."""
+    async def test_valid_response_fetched_and_cached(self, mock_coordinator):
+        """Valid zone-boundary response is returned and cached as JSON."""
         from custom_components.hass_dyson import image as image_module
         from custom_components.hass_dyson.coordinator import TTLCache
 
@@ -810,13 +818,12 @@ class TestFetchV2FloorPlanImage:
         cache = TTLCache(3600)
 
         with patch.object(image_module, "_floor_plan_cache", cache):
-            result = await image_module._fetch_v2_floor_plan_image(
+            result = await image_module._fetch_v2_floor_plan_data(
                 mock_coordinator, "clean-fp-1"
             )
 
-        assert result is not None
-        assert result[:4] == b"\x89PNG"
-        assert cache.get("VS9-GB-HJA0000A:fp:clean-fp-1") == result
+        assert result == fake_data
+        assert cache.get("VS9-GB-HJA0000A:fp:clean-fp-1") is not None
 
     @pytest.mark.asyncio
     async def test_api_error_caches_sentinel(self, mock_coordinator):
@@ -839,7 +846,7 @@ class TestFetchV2FloorPlanImage:
         cache = TTLCache(3600)
 
         with patch.object(image_module, "_floor_plan_cache", cache):
-            result = await image_module._fetch_v2_floor_plan_image(
+            result = await image_module._fetch_v2_floor_plan_data(
                 mock_coordinator, "clean-fp-2"
             )
 
@@ -848,11 +855,11 @@ class TestFetchV2FloorPlanImage:
 
     @pytest.mark.asyncio
     async def test_cache_hit_returns_without_api_call(self, mock_coordinator):
-        """A cached PNG is returned without a new API call."""
+        """A cached response is returned without a new API call."""
         from custom_components.hass_dyson import image as image_module
         from custom_components.hass_dyson.coordinator import TTLCache
 
-        expected_png = b"\x89PNG\r\nfake"
+        expected_data = {"cleanId": "clean-fp-3", "zones": []}
         fake_client = AsyncMock()
 
         @asynccontextmanager
@@ -861,14 +868,14 @@ class TestFetchV2FloorPlanImage:
 
         mock_coordinator.async_cloud_client = make_client
         cache = TTLCache(3600)
-        cache.set("VS9-GB-HJA0000A:fp:clean-fp-3", expected_png)
+        cache.set("VS9-GB-HJA0000A:fp:clean-fp-3", json.dumps(expected_data).encode())
 
         with patch.object(image_module, "_floor_plan_cache", cache):
-            result = await image_module._fetch_v2_floor_plan_image(
+            result = await image_module._fetch_v2_floor_plan_data(
                 mock_coordinator, "clean-fp-3"
             )
 
-        assert result == expected_png
+        assert result == expected_data
         fake_client.get_clean_map_data.assert_not_called()
 
 
@@ -992,6 +999,34 @@ class TestRenderV2FloorPlanPng:
         """No zone lines but a dock location still renders a PNG."""
         data = self._make_floor_plan_dict(include_zones=False, include_dock=True)
         result = _render_v2_floor_plan_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_robot_position_only_returns_png(self):
+        """A robot position alone (no zones/dock) is enough to render a PNG."""
+        data = self._make_floor_plan_dict(include_zones=False, include_dock=False)
+        result = _render_v2_floor_plan_png(data, robot_position=(0.01, -0.02, 1.2))
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_robot_position_none_omits_marker(self):
+        """robot_position=None renders identically to omitting the argument."""
+        data = self._make_floor_plan_dict()
+        with_none = _render_v2_floor_plan_png(data, robot_position=None)
+        without_arg = _render_v2_floor_plan_png(data)
+        assert with_none == without_arg
+
+    def test_robot_position_changes_pixels(self):
+        """Different robot positions produce a visibly different render."""
+        data = self._make_floor_plan_dict(include_zones=False, include_dock=False)
+        png_a = _render_v2_floor_plan_png(data, robot_position=(-0.03, -0.03, 0.0))
+        png_b = _render_v2_floor_plan_png(data, robot_position=(0.03, 0.03, 0.0))
+        assert png_a != png_b
+
+    def test_robot_position_without_angle_still_renders(self):
+        """A robot position with angle=None (no heading tick) still renders."""
+        data = self._make_floor_plan_dict(include_zones=False, include_dock=False)
+        result = _render_v2_floor_plan_png(data, robot_position=(0.0, 0.0, None))
         assert result is not None
         assert result[:4] == b"\x89PNG"
 
@@ -1964,7 +1999,7 @@ class TestDysonFloorPlanImage:
                 AsyncMock(return_value=None),
             ),
             patch(
-                "custom_components.hass_dyson.image._fetch_v2_floor_plan_image",
+                "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
                 AsyncMock(return_value=None),
             ),
         ):
@@ -1977,6 +2012,7 @@ class TestDysonFloorPlanImage:
         entity = self._make_entity(mock_coordinator)
         record = _make_clean_record(pmap_id="pmap-2", clean_id="clean-fp-id")
         pmap = _make_persistent_map(presentation_data=None)
+        fp_data = {"orientation": 0, "zones": [], "dockLocation": {"x": 0, "y": 0}}
         rendered_png = b"\x89PNG zone-floor"
         with (
             patch(
@@ -1992,15 +2028,70 @@ class TestDysonFloorPlanImage:
                 AsyncMock(return_value=None),
             ),
             patch(
-                "custom_components.hass_dyson.image._fetch_v2_floor_plan_image",
-                AsyncMock(return_value=rendered_png),
+                "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
+                AsyncMock(return_value=fp_data),
             ) as mock_fp,
+            patch(
+                "custom_components.hass_dyson.image._render_v2_floor_plan_png",
+                return_value=rendered_png,
+            ) as mock_render,
         ):
             result = await entity._build()
         assert result == rendered_png
         mock_fp.assert_awaited_once_with(mock_coordinator, "clean-fp-id")
+        mock_render.assert_called_once_with(fp_data, 0, robot_position=None)
         assert entity._render_cache_key == ("v2fp", "pmap-2", "clean-fp-id")
         assert entity._cached_png == rendered_png
+
+    @pytest.mark.asyncio
+    async def test_build_overlays_robot_position_while_cleaning(self, mock_coordinator):
+        """While the robot is actively cleaning, its live position is passed
+        through to the renderer and the entity-level cache is bypassed —
+        otherwise the dot would freeze at wherever it was on the first
+        render for the rest of the (unrelated) pmap_id/clean_id cache key.
+        """
+        from custom_components.hass_dyson.const import ROBOT_STATE_FULL_CLEAN_RUNNING
+
+        entity = self._make_entity(mock_coordinator)
+        record = _make_clean_record(pmap_id="pmap-2", clean_id="clean-fp-id")
+        pmap = _make_persistent_map(presentation_data=None)
+        fp_data = {"orientation": 0, "zones": [], "dockLocation": {"x": 0, "y": 0}}
+        mock_coordinator.device.robot_state = ROBOT_STATE_FULL_CLEAN_RUNNING
+        mock_coordinator.device.robot_global_position = [0.05, -0.02]
+        mock_coordinator.device.robot_global_angle = 1.0
+
+        with (
+            patch(
+                "custom_components.hass_dyson.image.fetch_clean_maps",
+                AsyncMock(return_value=[record]),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_persist_map",
+                AsyncMock(return_value=pmap),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_map_image",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
+                AsyncMock(return_value=fp_data),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._render_v2_floor_plan_png",
+                side_effect=[b"\x89PNG frame-1", b"\x89PNG frame-2"],
+            ) as mock_render,
+        ):
+            first = await entity._build()
+            second = await entity._build()
+
+        assert first == b"\x89PNG frame-1"
+        assert second == b"\x89PNG frame-2"  # not the entity cache — re-rendered
+        assert mock_render.call_count == 2
+        mock_render.assert_called_with(fp_data, 0, robot_position=(0.05, -0.02, 1.0))
+        # A live-position render must not be persisted into the entity cache.
+        assert entity._render_cache_key is None
+        assert entity._cached_png is None
 
     @pytest.mark.asyncio
     async def test_build_v2_floor_plan_via_map_visualizer(self, mock_coordinator):

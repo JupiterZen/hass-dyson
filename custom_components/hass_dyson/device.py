@@ -2820,11 +2820,24 @@ class DysonDevice:
         return None
 
     @property
-    def robot_global_position(self) -> list[int] | None:
-        """Return robot vacuum global position coordinates.
+    def robot_global_position(self) -> list[float] | None:
+        """Return the robot's most recent global position as [x, y] in metres.
+
+        RB05/Spot+Scrub sends this as its own partial ``CURRENT-STATE``
+        message while mapping/cleaning (probed 29 aug 2026, see
+        ``robot-probe/logs/run-6-probe.log``)::
+
+            {"msg":"CURRENT-STATE",
+             "globalPosition":[{"id":1,"x":0.0041,"y":-0.0311,
+                                 "angle":-2.9855,"update":0}, …]}
+
+        i.e. a list of pose objects (sometimes several batched per message,
+        world coordinates in metres, angle in radians) — not the ``[x, y]``
+        two-element list this property originally assumed. We only need the
+        latest pose, so this returns ``[x, y]`` from the last element.
 
         Returns:
-            List of [x, y] coordinates or None if not available
+            ``[x, y]`` in metres, or ``None`` if not available.
         """
         try:
             # Try product-state first (air purifiers), then top level (robot vacuums)
@@ -2835,14 +2848,47 @@ class DysonDevice:
             if position is None:
                 position = self._state_data.get("globalPosition")
 
-            if position and isinstance(position, list) and len(position) == 2:
-                pos_coords = [int(position[0]), int(position[1])]
-                _LOGGER.debug("Robot position for %s: %s", self._log_serial, pos_coords)
-                return pos_coords
+            if position and isinstance(position, list):
+                # RB05 format: list of {"x":.., "y":.., "angle":.., …} poses.
+                last = position[-1]
+                if isinstance(last, dict):
+                    pos_coords = [float(last["x"]), float(last["y"])]
+                    _LOGGER.debug(
+                        "Robot position for %s: %s", self._log_serial, pos_coords
+                    )
+                    return pos_coords
+                # Legacy/other-model format: flat [x, y] list.
+                if len(position) == 2:
+                    pos_coords = [float(position[0]), float(position[1])]
+                    _LOGGER.debug(
+                        "Robot position for %s: %s", self._log_serial, pos_coords
+                    )
+                    return pos_coords
         except (ValueError, TypeError, KeyError, IndexError) as e:
             _LOGGER.debug(
                 "Failed to get robot position for %s: %s", self._log_serial, e
             )
+        return None
+
+    @property
+    def robot_global_angle(self) -> float | None:
+        """Return the robot's most recent heading angle in radians (RB05 only).
+
+        Paired with :attr:`robot_global_position` — see that property's
+        docstring for the message format. ``None`` for legacy ``[x, y]``
+        position data (no angle) or when unavailable.
+        """
+        try:
+            product_state = self._state_data.get("product-state", {})
+            position = product_state.get("globalPosition")
+            if position is None:
+                position = self._state_data.get("globalPosition")
+            if position and isinstance(position, list):
+                last = position[-1]
+                if isinstance(last, dict) and "angle" in last:
+                    return float(last["angle"])
+        except (ValueError, TypeError, KeyError, IndexError) as e:
+            _LOGGER.debug("Failed to get robot angle for %s: %s", self._log_serial, e)
         return None
 
     @property

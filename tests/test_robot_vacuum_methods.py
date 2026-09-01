@@ -61,11 +61,22 @@ class TestRobotVacuumActualMethods:
         result = device.robot_battery_level
         assert result is None
 
-        # Test robot_global_position property
+        # Test robot_global_position property — legacy [x, y] format.
         device._state_data = {"product-state": {"globalPosition": [123, 456]}}
 
         result = device.robot_global_position
         assert result == [123, 456]
+
+        # RB05 format: list of pose objects, latest one wins.
+        device._state_data = {
+            "globalPosition": [
+                {"id": 1, "x": 0.0041, "y": -0.0311, "angle": -2.9855, "update": 0},
+                {"id": 2, "x": 0.0052, "y": -0.0280, "angle": -2.9000, "update": 0},
+            ]
+        }
+        result = device.robot_global_position
+        assert result == pytest.approx([0.0052, -0.0280])
+        assert device.robot_global_angle == pytest.approx(-2.9000)
 
         # Test with invalid position format
         device._state_data = {"product-state": {"globalPosition": "invalid_position"}}
@@ -77,6 +88,7 @@ class TestRobotVacuumActualMethods:
         device._state_data = {"product-state": {}}
         result = device.robot_global_position
         assert result is None
+        assert device.robot_global_angle is None
 
         # Test robot_full_clean_type property
         device._state_data = {"product-state": {"fullCleanType": "immediate"}}
