@@ -748,6 +748,11 @@ class TestPlatformDetermination:
         assert "binary_sensor" in platforms
         assert "button" in platforms
         assert "update" in platforms
+        # Without these, the RB05 switch/number entities (child lock, alarm,
+        # volume, air-dry duration, etc.) are defined but never created —
+        # discovered 1 sep 2026 in a real HA install after deploying them.
+        assert "switch" in platforms
+        assert "number" in platforms
 
     def test_get_platforms_for_fan_device_with_capabilities(self):
         """Test platform determination for fan with advanced capabilities."""
@@ -808,6 +813,8 @@ class TestPlatformDetermination:
 
         assert "vacuum" in platforms
         assert "update" in platforms
+        assert "switch" in platforms
+        assert "number" in platforms
 
     def test_get_platforms_switch_capability_logic(self):
         """Test switch platform logic based on capabilities."""

@@ -893,11 +893,20 @@ def _get_platforms_for_device(coordinator: DysonDataUpdateCoordinator) -> list[s
     ):  # Cleaning devices
         platforms.append("vacuum")
         # Robot/vacuum models expose a power-level select (Auto/Quick/Quiet/Boost
-        # on Vis Nav; Quiet/High/Max on Heurist; etc.) — see select.py.
+        # on Vis Nav; Quiet/High/Max on Heurist; etc.) plus, on RB05, the
+        # self-clean-interval and voice-language selects — see select.py.
         platforms.append("select")
         # Vis Nav exposes a dust-map image (rendered from cloud-fetched data)
         # and floor-plan presentation map. See image.py.
         platforms.append("image")
+        # RB05 dock/robot toggles (child lock, alarm, hot-water self-clean,
+        # etc. — see switch.py) and controls (volume, mop air-dry duration
+        # — see number.py). Without this, those entity classes are defined
+        # but the platform is never forwarded for robot devices, so they
+        # silently never get created — discovered 1 sep 2026 when none of
+        # the new robot switches/numbers appeared after deploying them.
+        platforms.append("switch")
+        platforms.append("number")
 
     # Add capability-based platforms for enhanced functionality
     if (
