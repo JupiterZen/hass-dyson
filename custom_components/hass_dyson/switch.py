@@ -7,13 +7,27 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.restore_state import RestoreEntity
+from libdyson_rest.models import PersistentMapMeta, ZoneMeta
 
-from .const import CAPABILITY_ENVIRONMENTAL_DATA, DEVICE_CATEGORY_ROBOT, DOMAIN
+from .const import (
+    CAPABILITY_ENVIRONMENTAL_DATA,
+    DEVICE_CATEGORY_ROBOT,
+    DOMAIN,
+    ROBOT_MSG_MAP_MANIFEST_UPDATED,
+)
 from .coordinator import DysonBLEDataUpdateCoordinator, DysonDataUpdateCoordinator
 from .device_utils import mask_serial
 from .entity import DysonBLEEntity, DysonEntity
+
+# Coalescing delay (seconds) between the robot's PERSISTENT-MAP-MANIFEST-
+# UPDATED broadcast and the zone-target-switch metadata re-fetch it triggers.
+# Same value as button.py's zone-button discovery — both react to the same
+# broadcast, no reason for the debounce windows to differ.
+_ZONE_SWITCH_MANIFEST_REFRESH_DEBOUNCE: float = 5.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,8 +116,122 @@ async def async_setup_entry(
         if "collectDustOnSelfClean" in coordinator.data:
             entities.append(DysonRobotCollectDustOnSelfCleanSwitch(coordinator))
 
+        # Per-zone "include in next multi-room clean" toggles — local
+        # selection state only, no MQTT/cloud write. Discovered from the
+        # same persistent-map metadata as the zone clean buttons in
+        # button.py, and refreshed on the same PERSISTENT-MAP-MANIFEST-
+        # UPDATED broadcast, but with a simpler lifecycle: no retry-backoff
+        # (button.py's Refresh Zone List button already covers recovering
+        # a failed initial fetch for the whole zone list) and no rename/
+        # retirement tracking (a switch is disposable local UI state, not
+        # a command target whose staleness could mis-clean a room).
+        await _async_setup_zone_target_switches(
+            hass, config_entry, coordinator, async_add_entities
+        )
+
     async_add_entities(entities, True)
     return True
+
+
+async def _async_setup_zone_target_switches(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    coordinator: DysonDataUpdateCoordinator,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Discover/refresh per-zone target switches for the robot's current map.
+
+    Scoped to the robot's *current* map only (unlike button.py's zone-clean
+    buttons, which cover every stored map) — the multi-select clean this
+    feeds targets one map per run, so switches for zones on a map the robot
+    isn't on would be misleading to show as selectable.
+    """
+    from .services import _effective_current_map, _fetch_persistent_map_metadata
+
+    known_switches: dict[str, DysonRobotZoneTargetSwitch] = {}
+
+    async def _async_discover() -> None:
+        try:
+            maps = await _fetch_persistent_map_metadata(coordinator)
+        except Exception as err:  # noqa: BLE001 — next broadcast/refresh retries
+            _LOGGER.debug(
+                "Zone-target-switch discovery failed for %s: %s",
+                coordinator.serial_number,
+                err,
+            )
+            return
+        if not maps:
+            return
+        pmap = _effective_current_map(maps, coordinator) or maps[0]
+
+        new_switches: list[DysonRobotZoneTargetSwitch] = []
+        fresh_ids: set[str] = set()
+        for zone in pmap.zones:
+            if not zone.id:
+                continue
+            fresh_ids.add(zone.id)
+            existing = known_switches.get(zone.id)
+            if existing is not None:
+                existing.async_update_zone_meta(pmap, zone)
+                continue
+            switch = DysonRobotZoneTargetSwitch(coordinator, pmap, zone)
+            known_switches[zone.id] = switch
+            new_switches.append(switch)
+
+        # A zone no longer on the current map (deleted, or the robot moved
+        # to a different map) — retire the switch. Unlike the zone-clean
+        # buttons, dropping it outright (rather than marking unavailable)
+        # is fine: it carries no command history worth preserving, and a
+        # returning zone just gets a fresh switch defaulting to unselected.
+        stale_ids = set(known_switches) - fresh_ids
+        for zone_id in stale_ids:
+            switch = known_switches.pop(zone_id)
+            if switch.hass is not None:
+                hass.async_create_task(switch.async_remove())
+
+        if new_switches:
+            async_add_entities(new_switches, True)
+
+    manifest_refresh_unsub: CALLBACK_TYPE | None = None
+    manifest_listener_removed = False
+
+    async def _async_manifest_refresh(_now) -> None:
+        nonlocal manifest_refresh_unsub
+        manifest_refresh_unsub = None
+        from .services import _persistent_map_cache
+
+        _persistent_map_cache.invalidate(coordinator.serial_number)
+        await _async_discover()
+
+    def _schedule_manifest_refresh() -> None:
+        nonlocal manifest_refresh_unsub
+        if manifest_listener_removed:
+            return
+        if manifest_refresh_unsub is not None:
+            manifest_refresh_unsub()
+        manifest_refresh_unsub = async_call_later(
+            hass, _ZONE_SWITCH_MANIFEST_REFRESH_DEBOUNCE, _async_manifest_refresh
+        )
+
+    def _on_device_message(topic: str, data: dict[str, Any]) -> None:
+        if data.get("msg") != ROBOT_MSG_MAP_MANIFEST_UPDATED:
+            return
+        hass.loop.call_soon_threadsafe(_schedule_manifest_refresh)
+
+    device = coordinator.device
+    if device is not None:
+        device.add_message_callback(_on_device_message)
+
+        def _remove_manifest_listener() -> None:
+            nonlocal manifest_listener_removed
+            manifest_listener_removed = True
+            device.remove_message_callback(_on_device_message)
+            if manifest_refresh_unsub is not None:
+                manifest_refresh_unsub()
+
+        config_entry.async_on_unload(_remove_manifest_listener)
+
+    await _async_discover()
 
 
 class DysonAutoModeSwitch(DysonEntity, SwitchEntity):
@@ -1160,6 +1288,84 @@ class DysonRobotCollectDustOnSelfCleanSwitch(_DysonRobotBooleanSwitch):
     _GETTER = "robot_collect_dust_on_self_clean"
     _SETTER = "set_robot_collect_dust_on_self_clean"
     _LABEL = "collect-dust-on-self-clean"
+
+
+class DysonRobotZoneTargetSwitch(DysonEntity, RestoreEntity, SwitchEntity):
+    """ "Include this room in the next multi-room clean" toggle.
+
+    Purely local UI selection state — turning this on/off sends nothing to
+    the device or the cloud. button.py's "Start Selected Zones" button
+    reads every switch's ``is_on`` at press time and starts one
+    ``hass_dyson.start_zone_clean`` call covering whichever rooms are
+    checked, mirroring the room-picker step of the MyDyson app's zone-clean
+    flow (minus the per-room cleaning-type/power options — see
+    dyson/CLAUDE.md's "Kamer-knoppen" section for why those aren't wired up
+    here: the app persists them to the Dyson cloud via an endpoint that
+    currently 500s, tracked as cmgrayb/libdyson-rest#226).
+
+    State survives restarts via RestoreEntity. One entity per zone on the
+    robot's *current* map — see
+    ``switch._async_setup_zone_target_switches`` for the discovery/refresh
+    lifecycle.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(
+        self,
+        coordinator: DysonDataUpdateCoordinator,
+        pmap: PersistentMapMeta,
+        zone: ZoneMeta,
+    ) -> None:
+        """Initialize the zone target switch."""
+        super().__init__(coordinator)
+        self._zone_id: str = zone.id
+        # unique_id is map-qualified, matching DysonZoneCleanButton — zone
+        # ids restart from 1 on every map.
+        self._attr_unique_id = (
+            f"{coordinator.serial_number}_zone_target_{pmap.id}_{self._zone_id}"
+        )
+        self._attr_entity_registry_enabled_default = True
+        self._attr_is_on = False
+        self._apply_zone_meta(pmap, zone)
+
+    def _apply_zone_meta(self, pmap: PersistentMapMeta, zone: ZoneMeta) -> None:
+        self.zone_name: str = str(zone.name or f"Zone {self._zone_id}")
+        self._attr_name = f"Target {self.zone_name}"
+        self._attr_icon = "mdi:checkbox-marked-circle-outline"
+        # Exposed as an attribute (not just the friendly name) so
+        # DysonStartSelectedZonesButton can read the exact zone name to
+        # pass to start_zone_clean without parsing "Target <name>".
+        self._attr_extra_state_attributes = {"zone_name": self.zone_name}
+
+    @callback
+    def async_update_zone_meta(self, pmap: PersistentMapMeta, zone: ZoneMeta) -> None:
+        """Refresh the zone name after a metadata re-fetch (e.g. app rename)."""
+        old_name = self._attr_name
+        self._apply_zone_meta(pmap, zone)
+        if (
+            self.hass is not None
+            and self.entity_id is not None
+            and (self._attr_name != old_name)
+        ):
+            self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last selection state across restarts."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            self._attr_is_on = last_state.state == "on"
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Mark this zone selected for the next multi-room clean."""
+        self._attr_is_on = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Unmark this zone."""
+        self._attr_is_on = False
+        self.async_write_ha_state()
 
 
 class DysonDaylightModeSwitch(DysonBLEEntity, SwitchEntity):

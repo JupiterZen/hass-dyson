@@ -177,6 +177,7 @@ async def async_setup_entry(
         [
             DysonReconnectButton(coordinator),
             DysonRefreshZonesButton(coordinator, _async_discover_zone_buttons),
+            DysonStartSelectedZonesButton(coordinator),
         ],
         True,
     )
@@ -488,6 +489,83 @@ class DysonZoneCleanButton(DysonEntity, ButtonEntity):
         except Exception as err:
             raise HomeAssistantError(
                 f"Failed to start clean of {self._zone_name}: {err}"
+            ) from err
+
+
+class DysonStartSelectedZonesButton(DysonEntity, ButtonEntity):
+    """Start a multi-room clean covering every checked zone-target switch.
+
+    Reads every ``switch.<device>_zone_target_<map>_<zone>`` entity's
+    current state at press time (via the entity registry, filtered by this
+    config entry — no direct reference to the switch objects is kept, so
+    this works across a HA restart without re-wiring anything) and starts
+    one ``hass_dyson.start_zone_clean`` call covering whichever zones are
+    on. Mirrors the room-picker step of the MyDyson app's zone-clean flow
+    (minus the per-room options — see switch.DysonRobotZoneTargetSwitch's
+    docstring for why).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the start-selected-zones button."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_start_selected_zones"
+        self._attr_translation_key = "start_selected_zones"
+        self._attr_icon = "mdi:play-circle"
+
+    def _selected_zone_names(self) -> list[str]:
+        """Return the zone_name of every currently-checked target switch."""
+        ent_reg = er.async_get(self.hass)
+        prefix = f"{self.coordinator.serial_number}_zone_target_"
+        names: list[str] = []
+        for entry in (
+            er.async_entries_for_config_entry(
+                ent_reg, self.registry_entry.config_entry_id
+            )
+            if self.registry_entry
+            else []
+        ):
+            if entry.domain != "switch" or not (entry.unique_id or "").startswith(
+                prefix
+            ):
+                continue
+            state = self.hass.states.get(entry.entity_id)
+            if state is not None and state.state == "on":
+                name = state.attributes.get("zone_name") or state.name
+                if name:
+                    names.append(str(name))
+        return names
+
+    async def async_press(self) -> None:
+        """Start a zone clean covering every currently-checked zone."""
+        zone_names = self._selected_zone_names()
+        if not zone_names:
+            raise HomeAssistantError(
+                "No zones selected — turn on at least one 'Target <room>' switch first"
+            )
+        if not self.registry_entry or not self.registry_entry.device_id:
+            raise HomeAssistantError(
+                f"Device {self.coordinator.serial_number} not available"
+            )
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                "start_zone_clean",
+                {
+                    "device_id": self.registry_entry.device_id,
+                    "zones": zone_names,
+                },
+                blocking=True,
+            )
+            _LOGGER.info(
+                "Started multi-room clean on %s: zones=%s",
+                self.coordinator.serial_number,
+                zone_names,
+            )
+        except Exception as err:
+            raise HomeAssistantError(
+                f"Failed to start selected-zones clean: {err}"
             ) from err
 
 

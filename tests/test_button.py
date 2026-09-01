@@ -14,6 +14,7 @@ from custom_components.hass_dyson.button import (
     ZONE_DISCOVERY_RETRY_DELAYS,
     DysonReconnectButton,
     DysonRefreshZonesButton,
+    DysonStartSelectedZonesButton,
     DysonZoneCleanButton,
     _async_migrate_zone_button_unique_ids,
     _icon_for_zone,
@@ -401,12 +402,14 @@ class TestButtonPlatformRobotSetup:
         ):
             await async_setup_entry(mock_hass, mock_config_entry, add_entities)
 
-        # Base call: reconnect + refresh; second call: the discovered zones
+        # Base call: reconnect + refresh + start-selected-zones; second call:
+        # the discovered zones
         assert add_entities.call_count == 2
         base = add_entities.call_args_list[0][0][0]
-        assert len(base) == 2
+        assert len(base) == 3
         assert isinstance(base[0], DysonReconnectButton)
         assert isinstance(base[1], DysonRefreshZonesButton)
+        assert isinstance(base[2], DysonStartSelectedZonesButton)
         zones = add_entities.call_args_list[1][0][0]
         assert len(zones) == 2
         assert all(isinstance(entity, DysonZoneCleanButton) for entity in zones)
@@ -429,12 +432,14 @@ class TestButtonPlatformRobotSetup:
         ):
             await async_setup_entry(mock_hass, mock_config_entry, add_entities)
 
-        # Reconnect + refresh are still created — no zone buttons yet
+        # Reconnect + refresh + start-selected-zones are still created — no
+        # zone buttons yet
         add_entities.assert_called_once()
         entities = add_entities.call_args[0][0]
-        assert len(entities) == 2
+        assert len(entities) == 3
         assert isinstance(entities[0], DysonReconnectButton)
         assert isinstance(entities[1], DysonRefreshZonesButton)
+        assert isinstance(entities[2], DysonStartSelectedZonesButton)
         # The first background retry is scheduled
         mock_call_later.assert_called_once()
         assert mock_call_later.call_args[0][1] == ZONE_DISCOVERY_RETRY_DELAYS[0]
@@ -460,9 +465,10 @@ class TestButtonPlatformRobotSetup:
         # Recovery buttons only; a successful-but-empty fetch schedules no retry
         add_entities.assert_called_once()
         entities = add_entities.call_args[0][0]
-        assert len(entities) == 2
+        assert len(entities) == 3
         assert isinstance(entities[0], DysonReconnectButton)
         assert isinstance(entities[1], DysonRefreshZonesButton)
+        assert isinstance(entities[2], DysonStartSelectedZonesButton)
         mock_call_later.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1780,3 +1786,154 @@ class TestMarkZoneDeleted:
 
         button.async_write_ha_state.assert_called_once()
         assert button.available is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: DysonStartSelectedZonesButton
+# ---------------------------------------------------------------------------
+
+
+class TestStartSelectedZonesButton:
+    """Tests for the multi-room clean start button."""
+
+    def _make_button(self, coordinator):
+        button = DysonStartSelectedZonesButton(coordinator)
+        button.hass = MagicMock()
+        button.registry_entry = MagicMock()
+        button.registry_entry.config_entry_id = "entry-1"
+        button.registry_entry.device_id = "device-1"
+        return button
+
+    def _mock_registry_entries(self, entries):
+        """entries: list of (domain, unique_id, entity_id) tuples."""
+        registry_entries = []
+        for domain, unique_id, entity_id in entries:
+            e = MagicMock()
+            e.domain = domain
+            e.unique_id = unique_id
+            e.entity_id = entity_id
+            registry_entries.append(e)
+        return registry_entries
+
+    def test_selected_zone_names_reads_on_switches_only(self, mock_robot_coordinator):
+        button = self._make_button(mock_robot_coordinator)
+        entries = self._mock_registry_entries(
+            [
+                (
+                    "switch",
+                    "VS9-GB-HJA0000A_zone_target_map-1_10",
+                    "switch.target_living_room",
+                ),
+                (
+                    "switch",
+                    "VS9-GB-HJA0000A_zone_target_map-1_12",
+                    "switch.target_kinderkamer",
+                ),
+                (
+                    "switch",
+                    "VS9-GB-HJA0000A_other_switch",
+                    "switch.unrelated",
+                ),
+                (
+                    "sensor",
+                    "VS9-GB-HJA0000A_zone_target_map-1_13",
+                    "sensor.not_a_switch",
+                ),
+            ]
+        )
+
+        def state_for(entity_id):
+            state = MagicMock()
+            if entity_id == "switch.target_living_room":
+                state.state = "on"
+                state.attributes = {"zone_name": "Living room"}
+            elif entity_id == "switch.target_kinderkamer":
+                state.state = "off"
+                state.attributes = {"zone_name": "Kinderkamer"}
+            else:
+                state.state = "on"
+                state.attributes = {}
+            return state
+
+        button.hass.states.get.side_effect = state_for
+        with (
+            patch("custom_components.hass_dyson.button.er.async_get"),
+            patch(
+                "custom_components.hass_dyson.button.er.async_entries_for_config_entry",
+                return_value=entries,
+            ),
+        ):
+            names = button._selected_zone_names()
+
+        assert names == ["Living room"]
+
+    def test_selected_zone_names_empty_when_none_checked(self, mock_robot_coordinator):
+        button = self._make_button(mock_robot_coordinator)
+        entries = self._mock_registry_entries(
+            [
+                (
+                    "switch",
+                    "VS9-GB-HJA0000A_zone_target_map-1_10",
+                    "switch.target_living_room",
+                ),
+            ]
+        )
+        state = MagicMock()
+        state.state = "off"
+        state.attributes = {"zone_name": "Living room"}
+        button.hass.states.get.return_value = state
+
+        with (
+            patch("custom_components.hass_dyson.button.er.async_get"),
+            patch(
+                "custom_components.hass_dyson.button.er.async_entries_for_config_entry",
+                return_value=entries,
+            ),
+        ):
+            names = button._selected_zone_names()
+
+        assert names == []
+
+    @pytest.mark.asyncio
+    async def test_press_raises_when_nothing_selected(self, mock_robot_coordinator):
+        button = self._make_button(mock_robot_coordinator)
+        with patch.object(button, "_selected_zone_names", return_value=[]):
+            with pytest.raises(HomeAssistantError, match="No zones selected"):
+                await button.async_press()
+
+    @pytest.mark.asyncio
+    async def test_press_calls_start_zone_clean_service(self, mock_robot_coordinator):
+        button = self._make_button(mock_robot_coordinator)
+        button.hass.services.async_call = AsyncMock()
+        with patch.object(
+            button, "_selected_zone_names", return_value=["Living room", "Kinderkamer"]
+        ):
+            await button.async_press()
+
+        button.hass.services.async_call.assert_awaited_once()
+        call_args = button.hass.services.async_call.call_args
+        assert call_args[0][0] == DOMAIN
+        assert call_args[0][1] == "start_zone_clean"
+        assert call_args[0][2] == {
+            "device_id": "device-1",
+            "zones": ["Living room", "Kinderkamer"],
+        }
+        assert call_args[1] == {"blocking": True}
+
+    @pytest.mark.asyncio
+    async def test_press_raises_when_no_device_id(self, mock_robot_coordinator):
+        button = self._make_button(mock_robot_coordinator)
+        button.registry_entry.device_id = None
+        with patch.object(button, "_selected_zone_names", return_value=["Living room"]):
+            with pytest.raises(HomeAssistantError, match="not available"):
+                await button.async_press()
+
+    @pytest.mark.asyncio
+    async def test_press_wraps_service_call_failure(self, mock_robot_coordinator):
+        button = self._make_button(mock_robot_coordinator)
+        button.hass.services.async_call = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch.object(button, "_selected_zone_names", return_value=["Living room"]):
+            with pytest.raises(
+                HomeAssistantError, match="Failed to start selected-zones clean"
+            ):
+                await button.async_press()

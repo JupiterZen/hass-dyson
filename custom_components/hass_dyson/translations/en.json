@@ -354,6 +354,9 @@
       },
       "refresh_zone_list": {
         "name": "Refresh Zone List"
+      },
+      "start_selected_zones": {
+        "name": "Start Selected Zones"
       }
     },
     "select": {
