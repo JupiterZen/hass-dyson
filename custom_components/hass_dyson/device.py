@@ -3250,9 +3250,10 @@ class DysonDevice:
     def robot_detergent(self) -> bool | None:
         """Return the robot's detergent-use setting, if reported.
 
-        Plain top-level boolean, constant (``true``) across both probe
-        captures — never toggled, so the write path is UNVERIFIED (see
-        :meth:`set_robot_detergent`). Only ever seen in CURRENT-STATE,
+        Plain top-level boolean. Write path VERIFIED 1 sep 2026 by
+        toggling ``switch.dyson_..._detergent`` off and back on against a
+        real RB05 via a live Home Assistant deployment — see
+        :meth:`set_robot_detergent`. Only ever seen in CURRENT-STATE,
         never STATE-CHANGE.
         """
         value = self._state_data.get("detergent")
@@ -3263,12 +3264,13 @@ class DysonDevice:
         """Return the robot's hot-water-mop setting, if reported.
 
         Distinct from :attr:`robot_hot_water_switch` (that one is the
-        "Zelfreinigend met heet water" dock self-clean toggle, confirmed
-        writable) — this field's relationship to that setting is
-        unconfirmed; it may be a related but separate control. Plain
-        top-level boolean, constant (``true``) across both probe captures
-        — never toggled, so the write path is UNVERIFIED (see
-        :meth:`set_robot_hot_water_mop`). Only ever seen in CURRENT-STATE,
+        "Zelfreinigend met heet water" dock self-clean toggle) — this
+        field's relationship to that setting is unconfirmed; it may be a
+        related but separate control. Plain top-level boolean. Write
+        path VERIFIED 1 sep 2026 by toggling
+        ``switch.dyson_..._hot_water_mop`` off and back on against a real
+        RB05 via a live Home Assistant deployment — see
+        :meth:`set_robot_hot_water_mop`. Only ever seen in CURRENT-STATE,
         never STATE-CHANGE.
         """
         value = self._state_data.get("hotWaterMop")
@@ -3280,10 +3282,11 @@ class DysonDevice:
 
         Confirmed distinct from "empty bin on dock" behavior (see
         ``robot-probe/README.md``: observed ``false`` during a
-        ``dockState: COLLECTING_DUST`` cycle). Plain top-level boolean,
-        constant (``false``) across both probe captures — never toggled,
-        so the write path is UNVERIFIED (see
-        :meth:`set_robot_collect_dust_on_self_clean`). Only ever seen in
+        ``dockState: COLLECTING_DUST`` cycle). Plain top-level boolean.
+        Write path VERIFIED 1 sep 2026 by toggling
+        ``switch.dyson_..._collect_dust_on_self_clean`` on and back off
+        against a real RB05 via a live Home Assistant deployment — see
+        :meth:`set_robot_collect_dust_on_self_clean`. Only ever seen in
         CURRENT-STATE, never STATE-CHANGE.
         """
         value = self._state_data.get("collectDustOnSelfClean")
@@ -4145,9 +4148,9 @@ class DysonDevice:
     async def set_robot_wash_mop_before_clean(self, enabled: bool) -> None:
         """Set whether the dock washes the mop before the robot departs.
 
-        PARTIALLY VERIFIED: see :meth:`set_robot_child_lock` — the envelope
-        shape is confirmed, but ``washMopBeforeClean`` itself was not
-        toggled during the 1 sep 2026 probe capture.
+        VERIFIED 1 sep 2026: toggled off and back on against a real RB05
+        via a live Home Assistant deployment
+        (``switch.dyson_7vs_eu_una6126a_wash_mop_before_clean``).
         """
         await self._send_robot_command(
             {
@@ -4342,11 +4345,10 @@ class DysonDevice:
     async def set_robot_detergent(self, enabled: bool) -> None:
         """Set the robot's detergent-use setting.
 
-        UNVERIFIED: ``detergent`` was constant across both probe
-        captures, never toggled by the app — the STATE-SET envelope
-        shape below follows the pattern confirmed for other robot fields
-        (:meth:`set_robot_alarm`, etc.), but this specific field/value
-        pairing has not been confirmed against a real RB05.
+        VERIFIED 1 sep 2026: toggled off and back on against a real RB05
+        via a live Home Assistant deployment
+        (``switch.dyson_7vs_eu_una6126a_detergent``). Robot's state
+        reflected the change within seconds.
         """
         await self._send_robot_command(
             {
@@ -4360,11 +4362,12 @@ class DysonDevice:
     async def set_robot_hot_water_mop(self, enabled: bool) -> None:
         """Set the robot's hot-water-mop setting.
 
-        UNVERIFIED: see :meth:`set_robot_detergent` — same caveat, no
-        captured app-initiated write to confirm the command shape for
-        this specific field. Distinct from :meth:`set_robot_hot_water_switch`
-        (confirmed writable) — see :attr:`robot_hot_water_mop`'s docstring
-        for how the two fields relate (unconfirmed).
+        VERIFIED 1 sep 2026: toggled off and back on against a real RB05
+        via a live Home Assistant deployment
+        (``switch.dyson_7vs_eu_una6126a_hot_water_mop``). Distinct from
+        :meth:`set_robot_hot_water_switch` — see
+        :attr:`robot_hot_water_mop`'s docstring for how the two fields
+        relate (still unconfirmed).
         """
         await self._send_robot_command(
             {
@@ -4378,8 +4381,9 @@ class DysonDevice:
     async def set_robot_collect_dust_on_self_clean(self, enabled: bool) -> None:
         """Set the robot's collect-dust-on-self-clean setting.
 
-        UNVERIFIED: see :meth:`set_robot_detergent` — same caveat, no
-        captured app-initiated write to confirm the command shape.
+        VERIFIED 1 sep 2026: toggled on and back off against a real RB05
+        via a live Home Assistant deployment
+        (``switch.dyson_7vs_eu_una6126a_collect_dust_on_self_clean``).
         """
         await self._send_robot_command(
             {

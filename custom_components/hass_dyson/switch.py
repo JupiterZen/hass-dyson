@@ -699,11 +699,8 @@ class DysonFindFollowSwitch(DysonEntity, SwitchEntity):
 class DysonRobotChildLockSwitch(DysonEntity, SwitchEntity):
     """Switch for a robot vacuum's child lock.
 
-    UNVERIFIED write path: no probe capture ever recorded an app-initiated
-    write to ``childLock``, so :meth:`DysonDevice.set_robot_child_lock`'s
-    STATE-SET command shape is unconfirmed against a real RB05 — see that
-    method's docstring. Reading the current state is confirmed (top-level
-    CURRENT-STATE boolean).
+    VERIFIED write path (1 sep 2026, live against a real RB05) — see
+    :meth:`DysonDevice.set_robot_child_lock`.
     """
 
     coordinator: DysonDataUpdateCoordinator
@@ -777,8 +774,8 @@ class DysonRobotChildLockSwitch(DysonEntity, SwitchEntity):
 class DysonRobotWashMopBeforeCleanSwitch(DysonEntity, SwitchEntity):
     """Switch for whether the dock washes the mop before the robot departs.
 
-    UNVERIFIED write path — see :class:`DysonRobotChildLockSwitch`. Reading
-    the current state is confirmed (top-level CURRENT-STATE boolean).
+    VERIFIED write path (1 sep 2026, live against a real RB05) — see
+    :meth:`DysonDevice.set_robot_wash_mop_before_clean`.
     """
 
     coordinator: DysonDataUpdateCoordinator
@@ -862,8 +859,8 @@ class DysonRobotDoNotDisturbSwitch(DysonEntity, SwitchEntity):
     separate entity, since HA has no built-in "switch with a time range"
     entity type.
 
-    UNVERIFIED write path — see :class:`DysonRobotChildLockSwitch`. Reading
-    the current state is confirmed (top-level CURRENT-STATE object).
+    VERIFIED write path (1 sep 2026, live against a real RB05) — see
+    :meth:`DysonDevice.set_robot_do_not_disturb`.
     """
 
     coordinator: DysonDataUpdateCoordinator
@@ -1030,9 +1027,9 @@ class _DysonRobotBooleanSwitch(DysonEntity, SwitchEntity):
     Subclasses set the four class attributes below; the read/update/
     turn_on/turn_off logic is identical across all of them (device
     property getter -> _attr_is_on, device method -> turn_on/turn_off).
-    Used for both confirmed-writable fields (alarm) and UNVERIFIED ones
-    (detergent, hotWaterMop, collectDustOnSelfClean) — see each concrete
-    subclass's docstring for its own verification status.
+    All four fields (alarm, detergent, hotWaterMop,
+    collectDustOnSelfClean) have a VERIFIED write path — see each
+    concrete subclass's docstring.
     """
 
     coordinator: DysonDataUpdateCoordinator
@@ -1121,7 +1118,8 @@ class DysonRobotAlarmSwitch(_DysonRobotBooleanSwitch):
 class DysonRobotDetergentSwitch(_DysonRobotBooleanSwitch):
     """Switch for the robot's detergent-use setting.
 
-    UNVERIFIED write path — see :meth:`DysonDevice.set_robot_detergent`.
+    VERIFIED write path (1 sep 2026, live against a real RB05) — see
+    :meth:`DysonDevice.set_robot_detergent`.
     """
 
     _KEY = "detergent"
@@ -1134,10 +1132,11 @@ class DysonRobotDetergentSwitch(_DysonRobotBooleanSwitch):
 class DysonRobotHotWaterMopSwitch(_DysonRobotBooleanSwitch):
     """Switch for the robot's hot-water-mop setting.
 
-    UNVERIFIED write path — see :meth:`DysonDevice.set_robot_hot_water_mop`.
-    Distinct from :class:`DysonRobotHotWaterSwitchSwitch` (confirmed
-    writable) — see :attr:`DysonDevice.robot_hot_water_mop`'s docstring
-    for how the two relate (unconfirmed).
+    VERIFIED write path (1 sep 2026, live against a real RB05) — see
+    :meth:`DysonDevice.set_robot_hot_water_mop`. Distinct from
+    :class:`DysonRobotHotWaterSwitchSwitch` — see
+    :attr:`DysonDevice.robot_hot_water_mop`'s docstring for how the two
+    relate (still unconfirmed).
     """
 
     _KEY = "hot_water_mop"
@@ -1150,7 +1149,7 @@ class DysonRobotHotWaterMopSwitch(_DysonRobotBooleanSwitch):
 class DysonRobotCollectDustOnSelfCleanSwitch(_DysonRobotBooleanSwitch):
     """Switch for the robot's collect-dust-on-self-clean setting.
 
-    UNVERIFIED write path — see
+    VERIFIED write path (1 sep 2026, live against a real RB05) — see
     :meth:`DysonDevice.set_robot_collect_dust_on_self_clean`. Confirmed
     distinct from "empty bin on dock" behavior (see
     :attr:`DysonDevice.robot_collect_dust_on_self_clean`'s docstring).

@@ -1,12 +1,9 @@
 """Tests for robot vacuum switch entities (child lock, wash-mop-before-clean,
 do-not-disturb, hot-water self-clean).
 
-childLock/washMopBeforeClean's write path is still unverified — neither
-probe capture ever recorded an app-initiated write to them, only to
-doNotDisturbMode/backWashType/hotWaterSwitch/airDryFrequency (see
-device.py docstrings for the 1 sep 2026 verification details). The
-STATE-SET envelope shape carries over from the verified fields, but not
-field-specific confirmation for those two.
+All write paths tested here are VERIFIED against a real RB05 via a live
+Home Assistant deployment on 1 sep 2026 (see device.py docstrings for
+the exact outbound STATE-SET commands confirmed for each field).
 """
 
 from unittest.mock import AsyncMock, MagicMock, Mock
