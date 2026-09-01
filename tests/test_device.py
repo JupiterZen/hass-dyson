@@ -1961,7 +1961,14 @@ class TestDysonDeviceProperties:
 
 
 class TestDysonDeviceRobotCommands:
-    """Test the (unverified) robot STATE-SET write methods."""
+    """Test the robot STATE-SET write methods.
+
+    Envelope shape (top-level key, no "data" wrapper, "mode-reason": "RAPP"
+    required) confirmed via the 1 sep 2026 probe capture
+    (run-6-probe.log): the app's own backWashType and doNotDisturbMode
+    writes used exactly this shape. See each method's docstring in
+    device.py for verification status of the specific field.
+    """
 
     @pytest.fixture
     def device_with_state(self, mock_hass):
@@ -1979,14 +1986,18 @@ class TestDysonDeviceRobotCommands:
         await device_with_state.set_robot_child_lock(True)
         sent = device_with_state._send_robot_command.call_args[0][0]
         assert sent["msg"] == "STATE-SET"
-        assert sent["data"] == {"childLock": True}
+        assert sent["childLock"] is True
+        assert sent["mode-reason"] == "RAPP"
+        assert "data" not in sent
 
     @pytest.mark.asyncio
     async def test_set_robot_wash_mop_before_clean_false(self, device_with_state):
         await device_with_state.set_robot_wash_mop_before_clean(False)
         sent = device_with_state._send_robot_command.call_args[0][0]
         assert sent["msg"] == "STATE-SET"
-        assert sent["data"] == {"washMopBeforeClean": False}
+        assert sent["washMopBeforeClean"] is False
+        assert sent["mode-reason"] == "RAPP"
+        assert "data" not in sent
 
     @pytest.mark.asyncio
     async def test_set_robot_do_not_disturb_enable_with_times(self, device_with_state):
@@ -1995,12 +2006,12 @@ class TestDysonDeviceRobotCommands:
         )
         sent = device_with_state._send_robot_command.call_args[0][0]
         assert sent["msg"] == "STATE-SET"
-        assert sent["data"] == {
-            "doNotDisturbMode": {
-                "isOn": True,
-                "startTime": "23:00",
-                "endTime": "7:00",
-            }
+        assert sent["mode-reason"] == "RAPP"
+        assert "data" not in sent
+        assert sent["doNotDisturbMode"] == {
+            "isOn": True,
+            "startTime": "23:00",
+            "endTime": "7:00",
         }
 
     @pytest.mark.asyncio
@@ -2017,7 +2028,7 @@ class TestDysonDeviceRobotCommands:
         }
         await device_with_state.set_robot_do_not_disturb(True)
         sent = device_with_state._send_robot_command.call_args[0][0]
-        assert sent["data"]["doNotDisturbMode"] == {
+        assert sent["doNotDisturbMode"] == {
             "isOn": True,
             "startTime": "21:00",
             "endTime": "6:30",
@@ -2031,7 +2042,7 @@ class TestDysonDeviceRobotCommands:
         device_with_state._state_data = {}
         await device_with_state.set_robot_do_not_disturb(True)
         sent = device_with_state._send_robot_command.call_args[0][0]
-        assert sent["data"]["doNotDisturbMode"] == {
+        assert sent["doNotDisturbMode"] == {
             "isOn": True,
             "startTime": "22:00",
             "endTime": "8:00",

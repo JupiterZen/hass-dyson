@@ -3892,32 +3892,40 @@ class DysonDevice:
     async def set_robot_child_lock(self, enabled: bool) -> None:
         """Set the robot's child lock on/off.
 
-        UNVERIFIED: no probe capture ever recorded an app-initiated write to
-        ``childLock`` — the STATE-SET message shape below follows the fan
-        product-state convention (:meth:`set_auto_mode`) as the closest known
-        analogue, but has not been confirmed against a real RB05. If this
-        does not take effect, capture the MQTT traffic from an app-side
-        toggle (see ``robot-probe/README.md``) and correct this method.
+        PARTIALLY VERIFIED (1 sep 2026 probe, ``run-6-probe.log``): the
+        STATE-SET command *shape* is confirmed — the app sent
+        ``{"msg":"STATE-SET","backWashType":"ROOM","time":"...",
+        "mode-reason":"RAPP"}`` and
+        ``{"doNotDisturbMode":{...},"mode-reason":"RAPP","msg":"STATE-SET",
+        "time":"..."}`` for other fields: the changed key sits top-level
+        alongside ``msg``/``time``/``mode-reason``, with no ``data``
+        wrapper — unlike this method's earlier (wrong) guess. ``childLock``
+        itself was not toggled during that capture, so the field name/value
+        pairing for this specific key is still unconfirmed, only the
+        envelope shape.
         """
         await self._send_robot_command(
             {
                 "msg": "STATE-SET",
+                "childLock": enabled,
                 "time": self._get_command_timestamp(),
-                "data": {"childLock": enabled},
+                "mode-reason": "RAPP",
             }
         )
 
     async def set_robot_wash_mop_before_clean(self, enabled: bool) -> None:
         """Set whether the dock washes the mop before the robot departs.
 
-        UNVERIFIED: see :meth:`set_robot_child_lock` — same caveat, no
-        captured app-initiated write to confirm the command shape.
+        PARTIALLY VERIFIED: see :meth:`set_robot_child_lock` — the envelope
+        shape is confirmed, but ``washMopBeforeClean`` itself was not
+        toggled during the 1 sep 2026 probe capture.
         """
         await self._send_robot_command(
             {
                 "msg": "STATE-SET",
+                "washMopBeforeClean": enabled,
                 "time": self._get_command_timestamp(),
-                "data": {"washMopBeforeClean": enabled},
+                "mode-reason": "RAPP",
             }
         )
 
@@ -3929,12 +3937,15 @@ class DysonDevice:
     ) -> None:
         """Set the robot's do-not-disturb schedule.
 
-        UNVERIFIED: see :meth:`set_robot_child_lock` — same caveat. Also
-        unconfirmed: whether the robot expects the full
-        ``{"isOn", "startTime", "endTime"}`` object on every write or
-        tolerates a partial one — this always sends all three, falling back
-        to the last-known schedule via :attr:`robot_do_not_disturb` when a
-        time isn't given, to avoid accidentally clearing it.
+        VERIFIED (1 sep 2026 probe, ``run-6-probe.log`` line 465333): the
+        app sent ``{"doNotDisturbMode":{"endTime":"8:00","startTime":"22:00",
+        "isOn":true},"mode-reason":"RAPP","msg":"STATE-SET",
+        "time":"2026-09-01T10:28:31Z"}`` and the robot's next CURRENT-STATE
+        reflected ``isOn: true`` immediately after. Sending the full
+        ``{"isOn", "startTime", "endTime"}`` object (not a partial one) on
+        every write matches the captured command and avoids accidentally
+        clearing the schedule; falls back to the last-known schedule via
+        :attr:`robot_do_not_disturb` when a time isn't given.
         """
         current = self.robot_do_not_disturb or {}
         payload = {
@@ -3945,8 +3956,9 @@ class DysonDevice:
         await self._send_robot_command(
             {
                 "msg": "STATE-SET",
+                "doNotDisturbMode": payload,
                 "time": self._get_command_timestamp(),
-                "data": {"doNotDisturbMode": payload},
+                "mode-reason": "RAPP",
             }
         )
 
