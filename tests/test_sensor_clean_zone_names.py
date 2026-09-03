@@ -111,6 +111,85 @@ class TestLastCleanZoneNames:
         assert sensor._attr_extra_state_attributes["zone_names"] == ["Hallway"]
 
 
+def _settings(clean_type: str | None):
+    return SimpleNamespace(clean_type=clean_type)
+
+
+class TestLastCleanZoneMethods:
+    """DysonLastCleanSensor's zone_clean_methods attribute.
+
+    Distinct from clean_type (spot/global — the overall run shape): this is
+    the per-zone CleanZoneSettings.clean_type ("vacuum"/"vacuumAndMop") —
+    what method the robot actually used in each zone during this run.
+    """
+
+    async def _update(self, coordinator, clean):
+        sensor = DysonLastCleanSensor(coordinator, 0)
+        with (
+            patch(
+                "custom_components.hass_dyson.sensor.fetch_clean_maps",
+                new=AsyncMock(return_value=[clean]),
+            ),
+            patch(
+                "custom_components.hass_dyson.services._persistent_map_cache",
+                _map_cache(_maps()),
+            ),
+        ):
+            await sensor.async_update()
+        return sensor
+
+    @pytest.mark.asyncio
+    async def test_resolves_method_per_zone_name(self, mock_robot_coordinator):
+        """Each selected zone's clean_type is keyed by its resolved name."""
+        clean = _clean(["1", "2"], "map-up")
+        clean.zones = [
+            SimpleNamespace(id="1", is_selected=True, settings=_settings("vacuum")),
+            SimpleNamespace(
+                id="2", is_selected=True, settings=_settings("vacuumAndMop")
+            ),
+        ]
+        sensor = await self._update(mock_robot_coordinator, clean)
+        assert sensor._attr_extra_state_attributes["zone_clean_methods"] == {
+            "Hallway": "vacuum",
+            "Office": "vacuumAndMop",
+        }
+
+    @pytest.mark.asyncio
+    async def test_unselected_zones_excluded(self, mock_robot_coordinator):
+        """A zone present on the record but not selected is not included."""
+        clean = _clean(["1"], "map-up")
+        clean.zones = [
+            SimpleNamespace(id="1", is_selected=True, settings=_settings("vacuum")),
+            SimpleNamespace(
+                id="2", is_selected=False, settings=_settings("vacuumAndMop")
+            ),
+        ]
+        sensor = await self._update(mock_robot_coordinator, clean)
+        assert sensor._attr_extra_state_attributes["zone_clean_methods"] == {
+            "Hallway": "vacuum",
+        }
+
+    @pytest.mark.asyncio
+    async def test_missing_settings_returns_none(self, mock_robot_coordinator):
+        """A selected zone with no settings object maps to None, not a crash."""
+        clean = _clean(["1"], "map-up")
+        clean.zones = [SimpleNamespace(id="1", is_selected=True, settings=None)]
+        sensor = await self._update(mock_robot_coordinator, clean)
+        assert sensor._attr_extra_state_attributes["zone_clean_methods"] == {
+            "Hallway": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_v1_record_without_zones_attr_returns_empty(
+        self, mock_robot_coordinator
+    ):
+        """A v1-style record with no per-zone settings support returns {}."""
+        clean = _clean([], None)
+        del clean.zones
+        sensor = await self._update(mock_robot_coordinator, clean)
+        assert sensor._attr_extra_state_attributes["zone_clean_methods"] == {}
+
+
 def _pred(zone_id: str, total: float = 10.0):
     dust = SimpleNamespace(
         extra_fine=1.0, fine=2.0, medium=3.0, large=4.0, other=0.5, total=total

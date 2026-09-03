@@ -3678,6 +3678,32 @@ def _extract_zone_ids(clean) -> list[str]:
     return list(prog.unordered_zones) + list(prog.ordered_zones)
 
 
+def _extract_zone_clean_methods(clean) -> dict[str, str | None]:
+    """Return {zone_id: clean_type} for the selected zones of a v2 CleanRecord.
+
+    Not to be confused with ``_extract_clean_type`` above (which returns
+    "spot"/"global" — the overall run *shape*). This is the per-zone
+    ``CleanZoneSettings.clean_type`` ("vacuum"/"vacuumAndMop"/etc.) — what
+    method the robot actually used in that zone during this specific run.
+    v1 records have no per-zone settings; returns {} for them.
+
+    Read-only history, mirroring what ``set_zone_behaviour()`` would set if
+    it worked — it doesn't (consistent 500 from Dyson's cloud, see
+    dyson/notes/07-...md in the smarthome repo), so this is purely for
+    "what happened", never "what to do next".
+    """
+    zones = getattr(clean, "zones", None)
+    if not zones:
+        return {}
+    result: dict[str, str | None] = {}
+    for z in zones:
+        if not getattr(z, "is_selected", False):
+            continue
+        settings = getattr(z, "settings", None)
+        result[z.id] = getattr(settings, "clean_type", None) if settings else None
+    return result
+
+
 def _extract_clean_type(clean) -> str:
     """Return a clean-type string (v1 or v2 schema).
 
@@ -3763,6 +3789,7 @@ class DysonLastCleanSensor(DysonEntity, SensorEntity):
             if zone_ids:
                 zone_source = "device_mqtt"
         zone_names: list[str] = []
+        id_to_name: dict[str, str] = {}
         if zone_ids:
             try:
                 from .services import _persistent_map_cache
@@ -3781,13 +3808,21 @@ class DysonLastCleanSensor(DysonEntity, SensorEntity):
                     clean_map_id = (
                         getattr(clean, "persistent_map_id", None) or stitch_map_id
                     )
-                    id_to_name: dict[str, str] = {}
                     for pmap in sorted(maps, key=lambda m: m.id != clean_map_id):
                         for z in pmap.zones:
                             id_to_name.setdefault(z.id, z.name or z.id)
                     zone_names = [id_to_name.get(zid, zid) for zid in zone_ids]
             except Exception:  # noqa: BLE001 — names are a nice-to-have
                 zone_names = []
+                id_to_name = {}
+
+        # {zone name: clean_type} rather than {zone id: clean_type} — falls
+        # back to the raw id when no name was resolved (e.g. id_to_name
+        # empty because the persistent-map cache was unavailable).
+        zone_clean_methods = {
+            id_to_name.get(zid, zid): method
+            for zid, method in _extract_zone_clean_methods(clean).items()
+        }
 
         self._attr_extra_state_attributes = {
             "clean_id": clean.clean_id,
@@ -3796,6 +3831,7 @@ class DysonLastCleanSensor(DysonEntity, SensorEntity):
             "area_m2": _extract_cleaned_area_m2(clean),
             "zone_ids": zone_ids,
             "zone_names": zone_names,
+            "zone_clean_methods": zone_clean_methods,
             "zone_source": zone_source,
             "fault_count": _extract_fault_count(clean),
             "sequence_number": getattr(clean, "sequence_number", None),
