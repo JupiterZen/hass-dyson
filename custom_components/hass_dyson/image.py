@@ -23,6 +23,10 @@ v2 devices (e.g. RB05 Spot+Scrub):
        Rendered client-side by _render_v2_map_png (purple→white heatmap +
        blue robot path + green dock icon).
   Floor plan strategy (priority order):
+    0. While actively cleaning: GET /v1/app/{serial}/live-maps/cleaning
+       Per-zone cleanStatus, furniture, restriction zones, live robot
+       position. Rendered client-side by _render_live_map_png. Session-
+       bound (404s once docked/idle) — only attempted while cleaning.
     1. Presentation bitmap in GET /v2/app/{serial}/persistent-maps/{id}
        (v1 Vis Nav only — not present for RB05).
     2. Map Visualizer API: GET /v1/mapvisualizer/devices/{serial}/map/{pmapId}
@@ -299,6 +303,44 @@ async def _fetch_v2_floor_plan_data(
 
     _floor_plan_cache.set(key, json.dumps(data).encode())
     return data
+
+
+async def _fetch_live_map_cleaning(
+    coordinator: DysonDataUpdateCoordinator,
+) -> dict | None:
+    """Fetch the live in-progress map via ``GET /v1/app/{serial}/live-maps/cleaning``.
+
+    Unlike ``_fetch_v2_floor_plan_data`` (the *last completed* clean's
+    zone geometry), this endpoint reflects the *currently running* clean —
+    each zone carries a live ``cleanStatus`` (``CLEAN_NOT_REQUESTED`` /
+    ``CLEAN_PENDING`` / ``CLEAN_IN_PROGRESS`` / ``CLEAN_COMPLETE`` /
+    ``CANT_CLEAN``), plus ``furniture``, ``restrictions`` and a live
+    ``dirt`` array. Confirmed via a live probe (3 sep 2026, see
+    ``dyson/notes/06-...md`` in the smarthome repo) that this is the
+    correct per-zone status source — better than inferring progress from
+    MQTT ``FULL_CLEAN_DISCOVERING`` transitions.
+
+    Deliberately uncached: the endpoint itself is session-bound (returns
+    HTTP 404 once the robot is docked/no active clean session exists), so
+    there's nothing stable to cache — every call either reflects the
+    current live state or fails outright, and a stale cached frame would
+    be actively misleading here (unlike the 6-hour zone-geometry cache
+    used elsewhere, which is safe because geometry rarely changes).
+    """
+    from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
+
+    async with coordinator.async_cloud_client() as client:
+        if client is None:
+            return None
+        try:
+            return await client.get_live_map_cleaning(coordinator.serial_number)
+        except (DysonAPIError, DysonAuthError) as err:
+            _LOGGER.debug(
+                "Live map (cleaning) fetch failed for %s: %s",
+                coordinator.serial_number,
+                err,
+            )
+            return None
 
 
 async def _fetch_persist_map(coordinator: DysonDataUpdateCoordinator, map_id: str):
@@ -807,6 +849,228 @@ def _render_v2_floor_plan_png(
     return buf.getvalue()
 
 
+# Per-zone fill colour keyed by the live ``cleanStatus`` value from
+# GET /v1/app/{serial}/live-maps/cleaning. Confirmed values (3 sep 2026
+# live probe, see dyson/notes/06-...md): CLEAN_NOT_REQUESTED (not
+# selected this run), CLEAN_PENDING (selected, not started yet),
+# CLEAN_IN_PROGRESS (robot currently in this zone), CLEAN_COMPLETE
+# (done), CANT_CLEAN (robot couldn't reach it — e.g. a physical
+# obstruction on the path). Unknown/future values fall back to
+# _ZONE_STATUS_FALLBACK_RGBA rather than being skipped, so a new status
+# Dyson might introduce still renders visibly instead of vanishing.
+_ZONE_STATUS_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
+    "CLEAN_NOT_REQUESTED": (235, 235, 235, 255),  # light grey — not part of this run
+    "CLEAN_PENDING": (255, 244, 200, 255),  # pale amber — queued
+    "CLEAN_IN_PROGRESS": (190, 225, 255, 255),  # light blue — robot is here now
+    "CLEAN_COMPLETE": (200, 240, 205, 255),  # light green — done
+    "CANT_CLEAN": (255, 205, 205, 255),  # light red — unreachable
+}
+_ZONE_STATUS_FALLBACK_RGBA: tuple[int, int, int, int] = (235, 235, 235, 255)
+
+
+def _render_live_map_png(
+    data: dict,
+    rotation_deg: int = 0,
+) -> bytes | None:
+    """Render a live-map PNG from ``GET /v1/app/{serial}/live-maps/cleaning``.
+
+    Unlike ``_render_v2_floor_plan_png`` (static zone outlines from the
+    last *completed* clean, with no per-zone status), this draws the
+    zones filled by their live ``cleanStatus`` colour (see
+    ``_ZONE_STATUS_FILL_RGBA``), plus furniture silhouettes, no-go
+    restriction zones, the dock, and the robot's current position —
+    everything the live-maps/cleaning response provides.
+
+    Unlike the v2 clean-maps-data response, this endpoint has no
+    ``dimensions`` object (no width/height/resolution/offset in pixels) —
+    only raw world-metre coordinates. The pixel canvas and world→pixel
+    mapping are derived here from the bounding box of every coordinate in
+    the response (zone outlines, furniture, dock, robot), with a fixed
+    resolution and a small margin, rather than trusting a server-provided
+    canvas size that doesn't exist for this endpoint.
+
+    JSON fields used: ``zones`` (list of ``{id, name, cleanStatus,
+    presentation: [{start, end, type}]}``), ``furniture`` (list of
+    ``{type, points: [{x, y}, ...]}`` polygons), ``restrictions`` (list of
+    ``{points, behavior}`` polygons), ``dockLocation`` (``{x, y, angle}``),
+    ``robotLocation`` (``{x, y, angle}``), ``orientation`` (int).
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        _LOGGER.warning("Pillow not available — cannot render live map PNG")
+        return None
+
+    try:
+        zones = data.get("zones") or []
+        furniture = data.get("furniture") or []
+        restrictions = data.get("restrictions") or []
+        dock = data.get("dockLocation")
+        robot = data.get("robotLocation")
+
+        # Collect every world-coordinate point to derive the bounding box —
+        # this endpoint gives no canvas dimensions, unlike v2 clean-maps-data.
+        points: list[tuple[float, float]] = []
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            for seg in zone.get("presentation") or []:
+                if not isinstance(seg, dict):
+                    continue
+                for key in ("start", "end"):
+                    pt = seg.get(key) or {}
+                    if pt.get("x") is not None and pt.get("y") is not None:
+                        points.append((float(pt["x"]), float(pt["y"])))
+        for item in furniture:
+            if not isinstance(item, dict):
+                continue
+            for pt in item.get("points") or []:
+                if isinstance(pt, dict) and pt.get("x") is not None:
+                    points.append((float(pt["x"]), float(pt["y"])))
+        for item in restrictions:
+            if not isinstance(item, dict):
+                continue
+            for pt in item.get("points") or []:
+                if isinstance(pt, dict) and pt.get("x") is not None:
+                    points.append((float(pt["x"]), float(pt["y"])))
+        if isinstance(dock, dict) and dock.get("x") is not None:
+            points.append((float(dock["x"]), float(dock["y"])))
+        if isinstance(robot, dict) and robot.get("x") is not None:
+            points.append((float(robot["x"]), float(robot["y"])))
+
+        if not points:
+            _LOGGER.debug("Live map: no coordinates found in response")
+            return None
+
+        min_x = min(p[0] for p in points)
+        max_x = max(p[0] for p in points)
+        min_y = min(p[1] for p in points)
+        max_y = max(p[1] for p in points)
+
+        margin_m = 0.3
+        resolution = 0.02  # metres per pixel — matches the ~2 cm grid used elsewhere
+        offset_x = min_x - margin_m
+        offset_y = min_y - margin_m
+        width = max(1, int((max_x - min_x + 2 * margin_m) / resolution))
+        height = max(1, int((max_y - min_y + 2 * margin_m) / resolution))
+
+        img = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        def _world_to_px(wx: float, wy: float) -> tuple[int, int]:
+            px = int((wx - offset_x) / resolution)
+            py = int((wy - offset_y) / resolution)
+            return (max(0, min(width - 1, px)), max(0, min(height - 1, py)))
+
+        # Zone fills first (so outlines/furniture/robot draw on top).
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            segs = zone.get("presentation") or []
+            poly = [
+                _world_to_px(float(seg["start"]["x"]), float(seg["start"]["y"]))
+                for seg in segs
+                if isinstance(seg, dict) and isinstance(seg.get("start"), dict)
+            ]
+            if len(poly) >= 3:
+                status = zone.get("cleanStatus")
+                fill = _ZONE_STATUS_FILL_RGBA.get(status, _ZONE_STATUS_FALLBACK_RGBA)
+                draw.polygon(poly, fill=fill)
+
+        # Zone outlines (same wall/room-separator distinction as the v2 renderer).
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            for seg in zone.get("presentation") or []:
+                if not isinstance(seg, dict):
+                    continue
+                start = seg.get("start") or {}
+                end = seg.get("end") or {}
+                sx, sy = _world_to_px(
+                    float(start.get("x") or 0), float(start.get("y") or 0)
+                )
+                ex, ey = _world_to_px(
+                    float(end.get("x") or 0), float(end.get("y") or 0)
+                )
+                line_type = seg.get("type", 0)
+                if line_type == 0:
+                    draw.line([sx, sy, ex, ey], fill=(40, 40, 40, 255), width=2)
+                else:
+                    draw.line([sx, sy, ex, ey], fill=(130, 130, 130, 255), width=1)
+
+        # Furniture silhouettes — light brown fill, no per-type styling (the
+        # ``type`` field, e.g. "tvStand"/"doubleBed", is cosmetic only here).
+        for item in furniture:
+            if not isinstance(item, dict):
+                continue
+            poly = [
+                _world_to_px(float(pt["x"]), float(pt["y"]))
+                for pt in item.get("points") or []
+                if isinstance(pt, dict) and pt.get("x") is not None
+            ]
+            if len(poly) >= 3:
+                draw.polygon(
+                    poly, fill=(210, 190, 165, 200), outline=(160, 140, 115, 255)
+                )
+
+        # No-go restriction zones — hatched-looking red outline (solid fill
+        # would obscure the zone-status colour underneath, which matters more).
+        for item in restrictions:
+            if not isinstance(item, dict):
+                continue
+            poly = [
+                _world_to_px(float(pt["x"]), float(pt["y"]))
+                for pt in item.get("points") or []
+                if isinstance(pt, dict) and pt.get("x") is not None
+            ]
+            if len(poly) >= 3:
+                draw.polygon(poly, outline=(200, 40, 40, 255))
+
+        # Dock — green filled circle.
+        if isinstance(dock, dict) and dock.get("x") is not None:
+            dx, dy = _world_to_px(float(dock["x"]), float(dock["y"]))
+            draw.ellipse(
+                [dx - 6, dy - 6, dx + 6, dy + 6],
+                fill=(0, 200, 80, 255),
+                outline=(0, 120, 40, 255),
+            )
+
+        # Robot — blue dot with heading tick, drawn last so it's always visible.
+        if isinstance(robot, dict) and robot.get("x") is not None:
+            rx, ry = _world_to_px(float(robot["x"]), float(robot["y"]))
+            draw.ellipse(
+                [rx - 7, ry - 7, rx + 7, ry + 7],
+                fill=(30, 100, 240, 255),
+                outline=(10, 50, 150, 255),
+            )
+            angle = robot.get("angle")
+            if angle is not None:
+                import math
+
+                tick_len = 12
+                tx = rx + tick_len * math.cos(float(angle))
+                ty = ry - tick_len * math.sin(float(angle))
+                draw.line([rx, ry, tx, ty], fill=(10, 50, 150, 255), width=2)
+
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Live map rendering failed: %s", err)
+        return None
+
+    img = _apply_orientation(img, rotation_deg)
+
+    max_dim = max(img.size)
+    if max_dim < 800:
+        factor = max(1, 800 // max_dim)
+        img = img.resize(
+            (img.size[0] * factor, img.size[1] * factor),
+            resample=Image.Resampling.NEAREST,
+        )
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
 def _render_presentation_png(
     presentation_png: bytes, rotation_deg: int = 0
 ) -> bytes | None:
@@ -999,6 +1263,11 @@ class DysonDustMapImage(DysonEntity, ImageEntity):
 class DysonFloorPlanImage(DysonEntity, ImageEntity):
     """Floor plan image entity — rendered from the persistent map or v2 zone boundaries.
 
+    While actively cleaning: prefers ``GET /v1/app/{serial}/live-maps/cleaning``
+    (``_render_live_map_png``) — per-zone ``cleanStatus``, furniture and
+    restriction-zone geometry, none of which the sources below provide.
+    Falls through to the below when idle or when that call fails/404s:
+
     For v1 devices (Vis Nav): uses the pre-rendered presentation PNG embedded in
     ``GET /v2/app/{serial}/persistent-maps/{id}``.
     For v2 devices (e.g. RB05 Spot+Scrub): renders zone boundary lines from
@@ -1025,6 +1294,27 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
         return True
 
     async def _build(self) -> bytes | None:
+        # While a clean is actively running, prefer the live-maps/cleaning
+        # endpoint: it carries per-zone cleanStatus, furniture and
+        # restriction-zone geometry that the completed-clean sources below
+        # don't have at all. Only attempted while cleaning — this endpoint
+        # 404s once the robot is docked/idle (confirmed via probe, see
+        # dyson/notes/06-...md), so there's no point calling it otherwise.
+        # Never cached (see _fetch_live_map_cleaning) and always retried on
+        # failure — a transient miss here should fall through to the
+        # completed-clean renderer below, not surface as "no floor plan".
+        device = self.coordinator.device
+        if device is not None:
+            ha_activity = ROBOT_STATE_TO_HA_STATE.get(device.robot_state)
+            if ha_activity == VacuumActivity.CLEANING:
+                live_data = await _fetch_live_map_cleaning(self.coordinator)
+                if live_data:
+                    rotation = int(live_data.get("orientation") or 0)
+                    png = _render_live_map_png(live_data, rotation)
+                    if png is not None:
+                        self._attr_image_last_updated = datetime.now(timezone.utc)
+                        return png
+
         cleans = await fetch_clean_maps(self.coordinator)
         if not cleans:
             return None

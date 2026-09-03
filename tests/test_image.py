@@ -33,6 +33,7 @@ from custom_components.hass_dyson.image import (
     _apply_orientation,
     _palette_from_floor_plan,
     _render_dust_map_png,
+    _render_live_map_png,
     _render_presentation_png,
     _render_v2_floor_plan_png,
     _render_v2_map_png,
@@ -879,6 +880,90 @@ class TestFetchV2FloorPlanData:
         fake_client.get_clean_map_data.assert_not_called()
 
 
+class TestFetchLiveMapCleaning:
+    """Tests for the live-maps/cleaning fetch helper.
+
+    Deliberately uncached (unlike _fetch_v2_floor_plan_data above) — the
+    endpoint itself is session-bound (404s once the robot is docked), so
+    every call must reflect the true current state.
+    """
+
+    @pytest.mark.asyncio
+    async def test_valid_response_returned(self, mock_coordinator):
+        """A valid live-map response is returned as-is."""
+        from custom_components.hass_dyson import image as image_module
+
+        fake_data = {
+            "id": "map-1",
+            "orientation": 0,
+            "robotLocation": {"x": 0.1, "y": 0.2, "angle": 0.0},
+            "zones": [
+                {
+                    "id": "15",
+                    "name": "Keuken",
+                    "cleanStatus": "CLEAN_IN_PROGRESS",
+                    "presentation": [],
+                }
+            ],
+        }
+        fake_client = AsyncMock()
+        fake_client.get_live_map_cleaning = AsyncMock(return_value=fake_data)
+
+        @asynccontextmanager
+        async def make_client():
+            yield fake_client
+
+        mock_coordinator.async_cloud_client = make_client
+
+        result = await image_module._fetch_live_map_cleaning(mock_coordinator)
+
+        assert result == fake_data
+        fake_client.get_live_map_cleaning.assert_awaited_once_with(
+            mock_coordinator.serial_number
+        )
+
+    @pytest.mark.asyncio
+    async def test_api_error_returns_none_uncached(self, mock_coordinator):
+        """An API error (e.g. 404 while docked/idle) returns None, not cached."""
+        from libdyson_rest.exceptions import DysonAPIError
+
+        from custom_components.hass_dyson import image as image_module
+
+        fake_client = AsyncMock()
+        fake_client.get_live_map_cleaning = AsyncMock(
+            side_effect=DysonAPIError("404 Not Found")
+        )
+
+        @asynccontextmanager
+        async def make_client():
+            yield fake_client
+
+        mock_coordinator.async_cloud_client = make_client
+
+        first = await image_module._fetch_live_map_cleaning(mock_coordinator)
+        second = await image_module._fetch_live_map_cleaning(mock_coordinator)
+
+        assert first is None
+        assert second is None
+        # Uncached — every call hits the API again (unlike _fetch_v2_floor_plan_data).
+        assert fake_client.get_live_map_cleaning.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_cloud_client_returns_none(self, mock_coordinator):
+        """No cloud client available (e.g. no auth token) returns None."""
+        from custom_components.hass_dyson import image as image_module
+
+        @asynccontextmanager
+        async def make_client():
+            yield None
+
+        mock_coordinator.async_cloud_client = make_client
+
+        result = await image_module._fetch_live_map_cleaning(mock_coordinator)
+
+        assert result is None
+
+
 # ---------------------------------------------------------------------------
 # Tests: _render_dust_map_png
 # ---------------------------------------------------------------------------
@@ -1061,6 +1146,196 @@ class TestRenderV2FloorPlanPng:
         """Multiple zones each with presentation lines are all drawn."""
         data = self._make_floor_plan_dict(num_zones=3)
         result = _render_v2_floor_plan_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+
+class TestRenderLiveMapPng:
+    """Test the live-maps/cleaning renderer (per-zone cleanStatus, furniture,
+    restriction zones, robot position). Unlike _render_v2_floor_plan_png,
+    this response has no dimensions object — the canvas is derived from the
+    bounding box of every coordinate in the response.
+    """
+
+    def _make_zone(self, zone_id: str = "15", status: str = "CLEAN_PENDING") -> dict:
+        return {
+            "id": zone_id,
+            "name": "Keuken",
+            "cleanStatus": status,
+            "presentation": [
+                {
+                    "start": {"x": -1.0, "y": -1.0},
+                    "end": {"x": 1.0, "y": -1.0},
+                    "type": 0,
+                },
+                {
+                    "start": {"x": 1.0, "y": -1.0},
+                    "end": {"x": 1.0, "y": 1.0},
+                    "type": 1,
+                },
+                {
+                    "start": {"x": 1.0, "y": 1.0},
+                    "end": {"x": -1.0, "y": 1.0},
+                    "type": 0,
+                },
+                {
+                    "start": {"x": -1.0, "y": 1.0},
+                    "end": {"x": -1.0, "y": -1.0},
+                    "type": 1,
+                },
+            ],
+        }
+
+    def test_valid_data_returns_png(self):
+        """A single zone with a status renders to a PNG."""
+        data = {"zones": [self._make_zone()], "orientation": 0}
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_no_coordinates_returns_none(self):
+        """No zones/furniture/restrictions/dock/robot returns None."""
+        data = {"zones": [], "furniture": [], "restrictions": []}
+        assert _render_live_map_png(data) is None
+
+    def test_each_clean_status_renders(self):
+        """Every known cleanStatus value renders without error."""
+        for status in (
+            "CLEAN_NOT_REQUESTED",
+            "CLEAN_PENDING",
+            "CLEAN_IN_PROGRESS",
+            "CLEAN_COMPLETE",
+            "CANT_CLEAN",
+        ):
+            data = {"zones": [self._make_zone(status=status)]}
+            result = _render_live_map_png(data)
+            assert result is not None, f"status {status} failed to render"
+            assert result[:4] == b"\x89PNG"
+
+    def test_unknown_clean_status_falls_back(self):
+        """An unrecognised cleanStatus (future API value) still renders."""
+        data = {"zones": [self._make_zone(status="SOME_FUTURE_STATUS")]}
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_different_statuses_produce_different_pixels(self):
+        """Different cleanStatus values are visibly distinguishable."""
+        pending = _render_live_map_png(
+            {"zones": [self._make_zone(status="CLEAN_PENDING")]}
+        )
+        complete = _render_live_map_png(
+            {"zones": [self._make_zone(status="CLEAN_COMPLETE")]}
+        )
+        assert pending != complete
+
+    def test_furniture_renders(self):
+        """Furniture polygons alone (no zones) are enough to render a PNG."""
+        data = {
+            "zones": [],
+            "furniture": [
+                {
+                    "id": "f1",
+                    "type": "tvStand",
+                    "points": [
+                        {"x": -0.5, "y": -0.5},
+                        {"x": -0.5, "y": 0.5},
+                        {"x": 0.5, "y": 0.5},
+                        {"x": 0.5, "y": -0.5},
+                    ],
+                }
+            ],
+        }
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_restrictions_render(self):
+        """Restriction-zone polygons alone (no zones) are enough to render a PNG."""
+        data = {
+            "zones": [],
+            "restrictions": [
+                {
+                    "id": "0",
+                    "behavior": "climbObstacle",
+                    "points": [
+                        {"x": -0.3, "y": -0.3},
+                        {"x": -0.3, "y": 0.3},
+                        {"x": 0.3, "y": 0.3},
+                        {"x": 0.3, "y": -0.3},
+                    ],
+                }
+            ],
+        }
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_dock_only_returns_png(self):
+        """A dock location alone (no zones) is enough to render a PNG."""
+        data = {"zones": [], "dockLocation": {"x": 0.0, "y": 0.0, "angle": 0.0}}
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_robot_location_only_returns_png(self):
+        """A robot location alone (no zones) is enough to render a PNG."""
+        data = {"zones": [], "robotLocation": {"x": 0.0, "y": 0.0, "angle": 1.5}}
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_robot_location_without_angle_still_renders(self):
+        """A robot location with angle=None (no heading tick) still renders."""
+        data = {"zones": [], "robotLocation": {"x": 0.0, "y": 0.0, "angle": None}}
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_rotation_applied(self):
+        """Rotation argument doesn't raise and still produces a PNG."""
+        data = {"zones": [self._make_zone()]}
+        result = _render_live_map_png(data, rotation_deg=90)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_small_image_is_upscaled(self):
+        """A small bounding box is scaled up well past its raw pixel size.
+
+        The fixed 0.3m margin on every side (see _render_live_map_png)
+        means the >=800px floor-division slack (e.g. 800 // 130 floors to
+        6, landing at 780 for a ~2m zone) can leave even a genuinely tiny
+        input just under 800px — so this asserts the upscale happened
+        (final size far exceeds the ~30px raw canvas), not an exact >=800
+        threshold the implementation doesn't strictly guarantee.
+        """
+        data = {
+            "zones": [
+                {
+                    "id": "tiny",
+                    "name": "Tiny",
+                    "cleanStatus": "CLEAN_PENDING",
+                    "presentation": [
+                        {
+                            "start": {"x": -0.01, "y": -0.01},
+                            "end": {"x": 0.01, "y": 0.01},
+                            "type": 0,
+                        }
+                    ],
+                }
+            ]
+        }
+        result = _render_live_map_png(data)
+        assert result is not None
+        img = Image.open(io.BytesIO(result))
+        # Raw canvas before upscaling is ~30px (0.02m margin x2 / 0.02m
+        # resolution) — the final image must be substantially larger.
+        assert min(img.size) >= 700
+
+    def test_missing_zones_key_with_dock_returns_png(self):
+        """A response missing the 'zones' key entirely still renders via dock."""
+        data = {"dockLocation": {"x": 0.0, "y": 0.0, "angle": 0.0}}
+        result = _render_live_map_png(data)
         assert result is not None
         assert result[:4] == b"\x89PNG"
 
@@ -2044,6 +2319,128 @@ class TestDysonFloorPlanImage:
         assert entity._cached_png == rendered_png
 
     @pytest.mark.asyncio
+    async def test_build_uses_live_map_while_cleaning(self, mock_coordinator):
+        """While actively cleaning, a successful live-maps/cleaning response
+        is used directly — the completed-clean fallback chain
+        (fetch_clean_maps/_fetch_persist_map/etc.) must not even be called.
+        """
+        from custom_components.hass_dyson.const import ROBOT_STATE_FULL_CLEAN_RUNNING
+
+        entity = self._make_entity(mock_coordinator)
+        mock_coordinator.device.robot_state = ROBOT_STATE_FULL_CLEAN_RUNNING
+        live_data = {
+            "orientation": 0,
+            "zones": [
+                {
+                    "id": "15",
+                    "name": "Keuken",
+                    "cleanStatus": "CLEAN_IN_PROGRESS",
+                    "presentation": [
+                        {
+                            "start": {"x": -1, "y": -1},
+                            "end": {"x": 1, "y": -1},
+                            "type": 0,
+                        }
+                    ],
+                }
+            ],
+        }
+        rendered_png = b"\x89PNG live"
+
+        with (
+            patch(
+                "custom_components.hass_dyson.image._fetch_live_map_cleaning",
+                AsyncMock(return_value=live_data),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._render_live_map_png",
+                MagicMock(return_value=rendered_png),
+            ) as mock_render,
+            patch(
+                "custom_components.hass_dyson.image.fetch_clean_maps",
+                AsyncMock(),
+            ) as mock_fetch_clean_maps,
+        ):
+            result = await entity._build()
+
+        assert result == rendered_png
+        mock_render.assert_called_once_with(live_data, 0)
+        mock_fetch_clean_maps.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_build_falls_back_when_live_map_render_fails(self, mock_coordinator):
+        """If the live-maps/cleaning renderer returns None (e.g. malformed
+        data), _build falls through to the completed-clean fallback chain
+        rather than surfacing no image at all.
+        """
+        from custom_components.hass_dyson.const import ROBOT_STATE_FULL_CLEAN_RUNNING
+
+        entity = self._make_entity(mock_coordinator)
+        mock_coordinator.device.robot_state = ROBOT_STATE_FULL_CLEAN_RUNNING
+        record = _make_clean_record(pmap_id="pmap-9")
+        png_b64 = base64.b64encode(_make_png()).decode()
+        pmap = _make_persistent_map(presentation_data=png_b64)
+
+        with (
+            patch(
+                "custom_components.hass_dyson.image._fetch_live_map_cleaning",
+                AsyncMock(return_value={"zones": []}),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._render_live_map_png",
+                MagicMock(return_value=None),
+            ),
+            patch(
+                "custom_components.hass_dyson.image.fetch_clean_maps",
+                AsyncMock(return_value=[record]),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_persist_map",
+                AsyncMock(return_value=pmap),
+            ),
+        ):
+            result = await entity._build()
+
+        # Went through the v1 presentation-bitmap path (re-encoded via
+        # _render_presentation_png, so not byte-identical to the decoded
+        # source) rather than staying on a live-map render (None) or
+        # surfacing no image at all.
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    @pytest.mark.asyncio
+    async def test_build_skips_live_map_when_not_cleaning(self, mock_coordinator):
+        """When the robot isn't actively cleaning, _fetch_live_map_cleaning
+        is never called — that endpoint 404s while docked/idle anyway.
+        """
+        entity = self._make_entity(mock_coordinator)
+        mock_coordinator.device.robot_state = "INACTIVE_CHARGING"
+        record = _make_clean_record(pmap_id="pmap-9")
+        pmap = _make_persistent_map()
+
+        with (
+            patch(
+                "custom_components.hass_dyson.image._fetch_live_map_cleaning",
+                AsyncMock(),
+            ) as mock_live_fetch,
+            patch(
+                "custom_components.hass_dyson.image.fetch_clean_maps",
+                AsyncMock(return_value=[record]),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_persist_map",
+                AsyncMock(return_value=pmap),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._apply_orientation",
+                side_effect=lambda img, deg: img,
+            ),
+        ):
+            await entity._build()
+
+        mock_live_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_build_overlays_robot_position_while_cleaning(self, mock_coordinator):
         """While the robot is actively cleaning, its live position is passed
         through to the renderer and the entity-level cache is bypassed —
@@ -2061,6 +2458,10 @@ class TestDysonFloorPlanImage:
         mock_coordinator.device.robot_global_angle = 1.0
 
         with (
+            patch(
+                "custom_components.hass_dyson.image._fetch_live_map_cleaning",
+                AsyncMock(return_value=None),
+            ),
             patch(
                 "custom_components.hass_dyson.image.fetch_clean_maps",
                 AsyncMock(return_value=[record]),
