@@ -1642,6 +1642,68 @@ class TestRenderLiveMapPng:
         assert result is not None
         assert result[:4] == b"\x89PNG"
 
+    def test_clean_path_alone_returns_png(self):
+        """cleanPath alone (no zones/furniture/dock/robot) renders a PNG.
+
+        Confirmed live (12 sep 2026): GET /v2/{serial}/clean-maps-data/
+        {cleanId} (a completed run, no robotLocation) carries the same
+        cleanPath field as the live-cleaning endpoint — this is what lets
+        the floor plan show the driven route after a clean finishes.
+        """
+        data = {
+            "zones": [],
+            "cleanPath": [
+                {"x": -0.5, "y": -0.5, "update": 0},
+                {"x": 0.5, "y": 0.5, "update": 0},
+            ],
+        }
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_clean_path_changes_pixels(self):
+        """A drawn route line visibly changes the render vs. no path."""
+        zone_only = _render_live_map_png({"zones": [self._make_zone()]})
+        with_path = _render_live_map_png(
+            {
+                "zones": [self._make_zone()],
+                "cleanPath": [
+                    {"x": -0.5, "y": -0.5, "update": 0},
+                    {"x": 0.5, "y": 0.5, "update": 0},
+                ],
+            }
+        )
+        assert zone_only != with_path
+
+    def test_single_point_clean_path_does_not_crash(self):
+        """A cleanPath with only one point draws no line but doesn't error."""
+        data = {
+            "zones": [self._make_zone()],
+            "cleanPath": [{"x": 0.0, "y": 0.0, "update": 0}],
+        }
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_clean_path_extends_bounding_box(self):
+        """cleanPath points outside the zone outlines still fit on canvas
+        (i.e. they're included in the bounding-box calculation, not just
+        drawn and clipped).
+        """
+        data = {
+            "zones": [self._make_zone()],
+            "cleanPath": [
+                {"x": -5.0, "y": -5.0, "update": 0},
+                {"x": 5.0, "y": 5.0, "update": 0},
+            ],
+        }
+        result = _render_live_map_png(data)
+        assert result is not None
+        img = Image.open(io.BytesIO(result))
+        # Route runs corner-to-corner across a canvas that must now span the
+        # full -5..5 range (plus margin), not just the zone's -1..1 outline.
+        assert min(img.size) > 300
+
 
 class TestRenderV2MapPng:
     """Test the v2 clean-maps-data PNG renderer."""
@@ -2585,8 +2647,60 @@ class TestDysonFloorPlanImage:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_build_v2_floor_plan_from_zone_boundaries(self, mock_coordinator):
-        """_build falls back to v2 zone-boundary renderer when visualizer returns nothing."""
+    async def test_build_v2_floor_plan_uses_rich_renderer_first(self, mock_coordinator):
+        """_build tries the rich live-map renderer on clean-maps-data first.
+
+        GET /v2/{serial}/clean-maps-data/{cleanId} carries the same fields
+        as live-maps/cleaning (zones with cleanStatus, furniture, etc. —
+        confirmed live 12 sep 2026), so a completed clean gets the same
+        detailed coloured map the MyDyson app shows, not just the plain
+        zone-outline fallback.
+        """
+        entity = self._make_entity(mock_coordinator)
+        record = _make_clean_record(pmap_id="pmap-2", clean_id="clean-fp-id")
+        pmap = _make_persistent_map(presentation_data=None)
+        fp_data = {"orientation": 0, "zones": [], "dockLocation": {"x": 0, "y": 0}}
+        rendered_png = b"\x89PNG rich-map"
+        with (
+            patch(
+                "custom_components.hass_dyson.image.fetch_clean_maps",
+                AsyncMock(return_value=[record]),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_persist_map",
+                AsyncMock(return_value=pmap),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_map_image",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
+                AsyncMock(return_value=fp_data),
+            ) as mock_fp,
+            patch(
+                "custom_components.hass_dyson.image._render_live_map_png",
+                return_value=rendered_png,
+            ) as mock_render_rich,
+            patch(
+                "custom_components.hass_dyson.image._render_v2_floor_plan_png",
+            ) as mock_render_fallback,
+        ):
+            result = await entity._build()
+        assert result == rendered_png
+        mock_fp.assert_awaited_once_with(mock_coordinator, "clean-fp-id")
+        mock_render_rich.assert_called_once_with(fp_data, 0)
+        mock_render_fallback.assert_not_called()
+        assert entity._render_cache_key == ("v2fp", "pmap-2", "clean-fp-id")
+        assert entity._cached_png == rendered_png
+
+    @pytest.mark.asyncio
+    async def test_build_v2_floor_plan_falls_back_when_rich_renderer_fails(
+        self, mock_coordinator
+    ):
+        """_build falls back to the plain zone-boundary renderer when the
+        rich renderer returns nothing (e.g. an older/incomplete response).
+        """
         entity = self._make_entity(mock_coordinator)
         record = _make_clean_record(pmap_id="pmap-2", clean_id="clean-fp-id")
         pmap = _make_persistent_map(presentation_data=None)
@@ -2609,6 +2723,10 @@ class TestDysonFloorPlanImage:
                 "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
                 AsyncMock(return_value=fp_data),
             ) as mock_fp,
+            patch(
+                "custom_components.hass_dyson.image._render_live_map_png",
+                return_value=None,
+            ),
             patch(
                 "custom_components.hass_dyson.image._render_v2_floor_plan_png",
                 return_value=rendered_png,
@@ -2820,6 +2938,10 @@ class TestDysonFloorPlanImage:
             patch(
                 "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
                 AsyncMock(return_value=fp_data),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._render_live_map_png",
+                return_value=None,
             ),
             patch(
                 "custom_components.hass_dyson.image._render_v2_floor_plan_png",

@@ -1022,6 +1022,7 @@ def _render_live_map_png(
         restrictions = data.get("restrictions") or []
         obstacles = data.get("obstacles") or []
         dirt = data.get("dirt") or []
+        clean_path = data.get("cleanPath") or []
         dock = data.get("dockLocation")
         robot = data.get("robotLocation")
 
@@ -1054,6 +1055,9 @@ def _render_live_map_png(
             if isinstance(item, dict) and item.get("x") is not None:
                 points.append((float(item["x"]), float(item["y"])))
         for item in dirt:
+            if isinstance(item, dict) and item.get("x") is not None:
+                points.append((float(item["x"]), float(item["y"])))
+        for item in clean_path:
             if isinstance(item, dict) and item.get("x") is not None:
                 points.append((float(item["x"]), float(item["y"])))
         if isinstance(dock, dict) and dock.get("x") is not None:
@@ -1120,6 +1124,20 @@ def _render_live_map_png(
                     draw.line([sx, sy, ex, ey], fill=(40, 40, 40, 255), width=2)
                 else:
                     draw.line([sx, sy, ex, ey], fill=(130, 130, 130, 255), width=1)
+
+        # Driven route for this clean — translucent blue line. Present in
+        # both the live-cleaning response (partial, grows as the clean
+        # progresses) and the completed clean-maps-data response (the full
+        # route) — see _render_v2_floor_plan_png's cleanPath handling for
+        # the same field on the other endpoint.
+        if clean_path:
+            pts = [
+                _world_to_px(float(p.get("x") or 0), float(p.get("y") or 0))
+                for p in clean_path
+                if isinstance(p, dict)
+            ]
+            if len(pts) > 1:
+                draw.line(pts, fill=(30, 144, 255, 200), width=2)
 
         # Furniture silhouettes — light brown fill, no per-type styling (the
         # ``type`` field, e.g. "tvStand"/"doubleBed", is cosmetic only here).
@@ -1447,13 +1465,19 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
 
     While actively cleaning: prefers ``GET /v1/app/{serial}/live-maps/cleaning``
     (``_render_live_map_png``) — per-zone ``cleanStatus``, furniture and
-    restriction-zone geometry, none of which the sources below provide.
-    Falls through to the below when idle or when that call fails/404s:
+    restriction-zone geometry, driven route, none of which the plain sources
+    below provide. Falls through to the below when idle or when that call
+    fails/404s:
 
     For v1 devices (Vis Nav): uses the pre-rendered presentation PNG embedded in
     ``GET /v2/app/{serial}/persistent-maps/{id}``.
-    For v2 devices (e.g. RB05 Spot+Scrub): renders zone boundary lines from
-    ``GET /v2/{serial}/clean-maps-data/{cleanId}`` via ``_render_v2_floor_plan_png``.
+    For v2 devices (e.g. RB05 Spot+Scrub): ``GET /v2/{serial}/clean-maps-data/
+    {cleanId}`` carries the same fields as live-maps/cleaning (confirmed live
+    12 sep 2026 — this is what lets the MyDyson app show a detailed coloured
+    map after a run finishes, not just while cleaning), so it's rendered with
+    ``_render_live_map_png`` too. Falls back to the plain zone-outline
+    ``_render_v2_floor_plan_png`` only if that renders nothing (e.g. an
+    older/incomplete response).
     """
 
     coordinator: DysonDataUpdateCoordinator
@@ -1576,9 +1600,15 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
                     pmap_id,
                 )
                 # v2 devices (e.g. RB05): no pre-rendered floor plan bitmap
-                # exists anywhere.  Render the zone boundary lines (plus the
-                # robot's live position, if cleaning) from the most recent
-                # clean-maps-data response instead.
+                # exists anywhere. GET /v2/{serial}/clean-maps-data/{cleanId}
+                # carries the same fields as the live-maps/cleaning response
+                # (zones with cleanStatus, furniture, restrictions,
+                # obstacles, cleanPath) — confirmed live (12 sep 2026) — so
+                # try the rich renderer first for the detailed coloured map
+                # the MyDyson app shows after a run finishes, same as while
+                # actively cleaning. _render_live_map_png tolerates a
+                # missing robotLocation (never present here) by simply
+                # omitting the robot marker.
                 clean_id = cleans[0].clean_id
                 png = None
                 if clean_id:
@@ -1587,9 +1617,15 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
                     )
                     if fp_data:
                         rotation = int(fp_data.get("orientation") or 0)
-                        png = _render_v2_floor_plan_png(
-                            fp_data, rotation, robot_position=robot_pos
-                        )
+                        png = _render_live_map_png(fp_data, rotation)
+                        if png is None:
+                            # Fall back to the plain zone-outline renderer —
+                            # e.g. an older/incomplete clean-maps-data
+                            # response missing the fields the rich renderer
+                            # needs.
+                            png = _render_v2_floor_plan_png(
+                                fp_data, rotation, robot_position=robot_pos
+                            )
                 if png is None:
                     _LOGGER.debug(
                         "Floor plan for %s: no floor plan image available for"
