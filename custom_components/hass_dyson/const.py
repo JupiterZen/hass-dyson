@@ -630,6 +630,13 @@ ROBOT_STATE_TO_HA_STATE: Final = {
     ROBOT_STATE_FULL_CLEAN_NEEDS_CHARGE: VacuumActivity.RETURNING,
     ROBOT_STATE_MAPPING_NEEDS_CHARGE: VacuumActivity.RETURNING,
     ROBOT_STATE_MAPPING_ABORTED: VacuumActivity.RETURNING,
+    # Confirmed live (7 sep 2026): a vacuum.stop command makes the robot
+    # report the bare "ABORTED", not "FULL_CLEAN_ABORTED" — a separate
+    # value from ROBOT_STATE_FULL_CLEAN_ABORTED above. device.py already
+    # treats it as non-terminal ("the robot is still out on the floor
+    # returning to the dock"); confirmed by watching global_position move
+    # toward the dock and the robot reach INACTIVE_CHARGING moments later.
+    "ABORTED": VacuumActivity.RETURNING,
     # Mapping as idle (non-cleaning operation)
     ROBOT_STATE_MAPPING_RUNNING: VacuumActivity.IDLE,
     ROBOT_STATE_MAPPING_FINISHED: VacuumActivity.IDLE,

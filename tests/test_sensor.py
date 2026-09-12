@@ -1489,6 +1489,137 @@ class TestDysonRobotVoiceDownloadStatusSensor:
         assert sensor._attr_native_value is None
 
 
+class TestDysonRobotActiveFaultSensor:
+    """Test DysonRobotActiveFaultSensor using pure pytest."""
+
+    def test_sensor_init(self, pure_mock_coordinator):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotActiveFaultSensor,
+        )
+
+        sensor = DysonRobotActiveFaultSensor(pure_mock_coordinator)
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_robot_active_fault"
+        )
+        assert sensor._attr_translation_key == "robot_active_fault"
+
+    def test_sensor_no_active_faults(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotActiveFaultSensor,
+        )
+
+        pure_mock_coordinator.device.robot_active_faults = []
+        sensor = DysonRobotActiveFaultSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "none"
+        assert sensor._attr_extra_state_attributes == {"active_faults": []}
+
+    def test_sensor_known_fault_code(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotActiveFaultSensor,
+        )
+
+        pure_mock_coordinator.device.robot_active_faults = [
+            {"faultCode": "581", "nextActionRequired": "USER_CONTINUE"}
+        ]
+        sensor = DysonRobotActiveFaultSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "581"
+        assert sensor._attr_extra_state_attributes["description"] == (
+            "Clean water tank empty"
+        )
+        assert sensor._attr_extra_state_attributes["next_action_required"] == (
+            "USER_CONTINUE"
+        )
+        assert sensor._attr_extra_state_attributes["required_user_action"] is None
+        assert sensor._attr_extra_state_attributes["active_faults"] == [
+            {"faultCode": "581", "nextActionRequired": "USER_CONTINUE"}
+        ]
+
+    def test_sensor_unknown_fault_code_falls_back(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotActiveFaultSensor,
+        )
+
+        pure_mock_coordinator.device.robot_active_faults = [
+            {"faultCode": "9999", "nextActionRequired": "LOG_ONLY"}
+        ]
+        sensor = DysonRobotActiveFaultSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "9999"
+        assert sensor._attr_extra_state_attributes["description"] == "Fault 9999"
+
+    def test_sensor_multiple_faults_kept_in_attribute(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotActiveFaultSensor,
+        )
+
+        pure_mock_coordinator.device.robot_active_faults = [
+            {"faultCode": "581", "nextActionRequired": "USER_CONTINUE"},
+            {"faultCode": "2105", "nextActionRequired": "LOG_ONLY"},
+        ]
+        sensor = DysonRobotActiveFaultSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        # Primary (state/description) reflects the first entry; the full
+        # list — including the second fault — stays available in the
+        # active_faults attribute.
+        assert sensor._attr_native_value == "581"
+        assert len(sensor._attr_extra_state_attributes["active_faults"]) == 2
+
+    def test_sensor_none_before_first_message(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotActiveFaultSensor,
+        )
+
+        pure_mock_coordinator.device.robot_active_faults = None
+        sensor = DysonRobotActiveFaultSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "none"
+        assert sensor._attr_extra_state_attributes == {"active_faults": []}
+
+    def test_sensor_device_unavailable(self, pure_mock_coordinator, pure_mock_hass):
+        from custom_components.hass_dyson.sensor import (
+            DysonRobotActiveFaultSensor,
+        )
+
+        sensor = DysonRobotActiveFaultSensor(pure_mock_coordinator)
+        sensor.hass = pure_mock_hass
+        pure_mock_coordinator.device = None
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == "none"
+        assert sensor._attr_extra_state_attributes == {"active_faults": []}
+
+
 class TestDysonRobotFullCleanActionSensor:
     """Test DysonRobotFullCleanActionSensor using pure pytest."""
 

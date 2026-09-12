@@ -50,6 +50,7 @@ Sensor States:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import timedelta
 from typing import Any
 
@@ -58,6 +59,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
+from homeassistant.components.vacuum import VacuumActivity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
@@ -71,6 +73,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from .const import (
     _CO2_UNAVAILABLE_STATES,
@@ -79,10 +82,12 @@ from .const import (
     CAPABILITY_FORMALDEHYDE,
     CAPABILITY_VOC,
     DOMAIN,
+    ROBOT_STATE_TO_HA_STATE,
 )
 from .coordinator import DysonDataUpdateCoordinator, TTLCache
 from .device_utils import mask_serial
 from .entity import DysonEntity
+from .image import _fetch_live_map_cleaning
 from .vacuum import _clean_maps_cache, fetch_clean_maps
 
 _LOGGER = logging.getLogger(__name__)
@@ -1538,6 +1543,13 @@ async def async_setup_entry(  # noqa: C901
             # for robot devices, stays unavailable until the first
             # VOICE-DOWNLOAD-STATUS message arrives.
             entities.append(DysonRobotVoiceDownloadStatusSensor(coordinator))
+            # Active-fault sensor: activeFaults/newActiveFaults can
+            # legitimately be an empty list when nothing's wrong, so gating
+            # on key-presence like dockState/fullCleanAction above would
+            # miss a robot that starts fault-free and only reports a fault
+            # later. Created unconditionally for robot devices, same as
+            # the voice-download sensor.
+            entities.append(DysonRobotActiveFaultSensor(coordinator))
             # Cloud-fetched cleaning history + Dyson's recommended-next-room
             # sensor. Both gated on cloud auth.
             if coordinator.config_entry.data.get("auth_token"):
@@ -1546,6 +1558,17 @@ async def async_setup_entry(  # noqa: C901
                 entities.append(DysonRecommendedCleanSensor(coordinator))
                 entities.append(DysonCurrentMapSensor(coordinator))
                 _register_end_of_clean_listener(hass, config_entry, coordinator)
+                # Per-clean obstacle/dirt/spot-zone tallies — same live-maps/
+                # cleaning endpoint as the floor-plan image, so gated on the
+                # same cloud-auth requirement.
+                entities.append(DysonRobotObstaclesSensor(coordinator))
+                entities.append(DysonRobotDirtSensor(coordinator))
+                entities.append(DysonRobotSpotZonesSensor(coordinator))
+                # Resume-simulation tally: which zones already finished
+                # this run, for a departure automation to skip re-cleaning
+                # them after an early vacuum.stop. Same cloud-auth gate —
+                # reads the same live-maps/cleaning endpoint.
+                entities.append(DysonRobotResumeSimulationSensor(coordinator))
 
         # Cloud-fetched purifier sensors (outdoor AQI, daily history,
         # MyDyson scheduled events). Only for ec-category devices (air
@@ -3516,6 +3539,102 @@ class DysonRobotCleaningStateSensor(DysonEntity, SensorEntity):
         super()._handle_coordinator_update()
 
 
+# Human-readable labels for numeric robot faultCode values (distinct from
+# the AIRWAYS/BATTERY/... subsystem faults dict — see
+# DysonRobotActiveFaultSensor's docstring). Deliberately small and
+# lookup-only: an unmapped code still renders (falls back to "Fault
+# <code>"), so this only needs entries confirmed live, not every code
+# Dyson's firmware could ever send.
+_ROBOT_FAULT_CODE_LABELS: dict[str, str] = {
+    # Confirmed live 7 sep 2026: caused FULL_CLEAN_PAUSED with
+    # nextActionRequired=USER_CONTINUE mid-mop — the dock's clean-water
+    # tank was empty.
+    "581": "Clean water tank empty",
+    # Confirmed live 7 sep 2026: seen during dockState=DRYING_MOP with
+    # nextActionRequired=LOG_ONLY — informational only, no user action.
+    "2105": "Drying (informational)",
+    # Confirmed live 7 sep 2026: matches the MyDyson app's "Can't clean
+    # target area — remove any obstacles blocking the way" message,
+    # nextActionRequired=USER_CONTINUE.
+    "2007": "Target area unreachable — obstacle blocking the way",
+    # Seen live 8 sep 2026 mid-clean, nextActionRequired=LOG_ONLY — no
+    # confirmed app-side message to match against yet (unlike 2007/2105),
+    # so keep this label honest about that rather than guessing.
+    "2109": "Informational (meaning not yet confirmed)",
+    # Confirmed live 8 sep 2026: matches the MyDyson app's "Kan gebied
+    # niet bereiken" ("Can't reach area") message, seen while the robot
+    # was FULL_CLEAN_FINISHED/returning to dock after the last room
+    # (Keuken) — distinct from 2007, which is the same underlying
+    # "unreachable" condition but seen mid-clean instead of on the way
+    # back. nextActionRequired=USER_CONTINUE.
+    "2012": "Can't reach area (seen while returning to dock)",
+}
+
+
+class DysonRobotActiveFaultSensor(DysonEntity, SensorEntity):
+    """Robot's current active-fault code, if any.
+
+    Distinct from the AIRWAYS/BATTERY/BRUSH_BAR_AND_TRACTION/
+    CHARGE_STATION/LIFT/LOST/OPTICS subsystem binary sensors (see
+    binary_sensor.py): those match against ``DysonDevice.robot_faults``,
+    a dict keyed by subsystem name. This reads
+    :attr:`DysonDevice.robot_active_faults` instead — a list of numeric
+    ``faultCode`` entries (``newActiveFaults``/``activeFaults`` in MQTT)
+    that lives in a completely separate code space and was never wired
+    to an entity. Confirmed live 7 sep 2026: faultCode 581 (empty
+    clean-water tank) paused an in-progress mop and had no visible HA
+    signal until this sensor.
+
+    State is the bare numeric code (or "none" when no fault is active) —
+    kept machine-stable across firmware/label changes. The human-readable
+    text lives in the ``description`` attribute instead, via
+    ``_ROBOT_FAULT_CODE_LABELS`` with an unmapped-code fallback so a
+    future firmware's new codes still render instead of crashing.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the active-fault sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_active_fault"
+        self._attr_translation_key = "robot_active_fault"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_icon = "mdi:alert-circle-outline"
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        device = self.coordinator.device
+        try:
+            faults = getattr(device, "robot_active_faults", None) if device else None
+            if not isinstance(faults, list) or not faults:
+                self._attr_native_value = "none"
+                self._attr_extra_state_attributes = {"active_faults": []}
+                super()._handle_coordinator_update()
+                return
+
+            primary = faults[0] if isinstance(faults[0], dict) else {}
+            code = primary.get("faultCode")
+            self._attr_native_value = str(code) if code is not None else "none"
+            self._attr_extra_state_attributes = {
+                "description": _ROBOT_FAULT_CODE_LABELS.get(str(code), f"Fault {code}")
+                if code is not None
+                else None,
+                "next_action_required": primary.get("nextActionRequired"),
+                "required_user_action": primary.get("requiredUserAction"),
+                "active_faults": faults,
+            }
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot active-fault sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+            self._attr_extra_state_attributes = {}
+        super()._handle_coordinator_update()
+
+
 class DysonRobotConsumableSensor(DysonEntity, SensorEntity):
     """Per-part consumable usage for robot vacuums.
 
@@ -4420,3 +4539,571 @@ class DysonScheduledEventsSensor(DysonEntity, SensorEntity):
             "total_event_count": len(events),
             "events": [e.raw for e in active_events],
         }
+
+
+# ============================================================================
+# Per-clean detection logging (obstacles / dirt / spot zones)
+# ============================================================================
+# GET /v1/app/{serial}/live-maps/cleaning (see _fetch_live_map_cleaning in
+# image.py) carries three live detection arrays alongside the per-zone
+# cleanStatus geometry that the floor-plan image renders: `obstacles`
+# ({x, y} points), `dirt` ({x, y, type, isUvScanOn} points — confirmed live
+# 5 sep 2026 with type "solid") and `spotZones` (schema unconfirmed, still
+# empty in every probe so far). Each poll (~30s, driven by the floor-plan
+# image entity's own polling) returns the *complete* current list, not a
+# delta, so the same point reappears on every subsequent poll until the
+# clean ends.
+#
+# These three sensors turn that into a per-clean tally: each accumulates the
+# distinct points seen so far during the *current* clean, tagged with when
+# each was first seen. "Distinct" is by proximity rather than exact
+# coordinate equality — the cloud's reported x/y for the same physical spot
+# drifts by a few centimetres between polls (observed in the live probe),
+# so exact-match dedup would undercount.
+
+# Points within this radius (metres) of an already-seen point are treated as
+# the same detection rather than a new one. Chosen well below typical
+# furniture/room-feature spacing (~0.3m+ in the probed floor plan) so
+# distinct real-world spots aren't merged, while comfortably covering the
+# few-centimetre drift observed between polls of the same spot.
+_DETECTION_DEDUP_RADIUS_M = 0.15
+
+# _fetch_live_map_cleaning (image.py) now carries its own short-TTL cache
+# and per-serial in-flight lock, shared by every caller of that endpoint —
+# this used to be a second, separate cache layer just for these three
+# sensors, but that meant the image entity and these sensors were still
+# hitting Dyson's cloud independently of each other, which was part of what
+# caused live 429 Too Many Requests responses (6 sep 2026). Kept as a thin
+# alias, not a bare re-import, so call sites here read as
+# detection-specific without callers needing to know the fetch is now
+# shared with the floor-plan image.
+_fetch_live_map_for_detections = _fetch_live_map_cleaning
+
+
+def _is_cleaning(coordinator: DysonDataUpdateCoordinator) -> bool:
+    """Whether the robot is actively cleaning right now (vs. idle/docked)."""
+    device = coordinator.device
+    if device is None:
+        return False
+    return (
+        ROBOT_STATE_TO_HA_STATE.get(getattr(device, "robot_state", None))
+        == VacuumActivity.CLEANING
+    )
+
+
+def _current_clean_id(coordinator: DysonDataUpdateCoordinator) -> str | None:
+    """Stable id for the clean session in progress, for detecting a new clean.
+
+    ``device.robot_clean_id`` (MQTT-echoed ``cleanId``) is the theoretically
+    preferred source — no extra HTTP round-trip, always available the
+    instant a clean starts — and is kept as the first attempt. But it has
+    been confirmed live, via MQTT debug logging against a real 7VS-EU
+    device, to never actually populate: the robot's CURRENT-STATE messages
+    for this model/firmware simply don't carry ``cleanId``. Silently
+    returning None forever from a mixin meant to reset on a new clean is a
+    real bug (confirmed live too — a detection sensor's tally was wiped by
+    an unrelated HA restart, because ``_restore_tally`` also gated on this
+    always-absent value), so this now falls back to ``fetch_clean_maps``
+    (10-minute cache, shared with the last-clean sensors) when the MQTT
+    field is absent. That cache lag is irrelevant for THIS function's
+    job — noticing "the clean identity changed" between polls a poll or
+    two after it happens is fine — the tight, per-poll-fresh case (telling
+    a genuinely new clean apart from the one just finishing, without
+    waiting on a 10-minute cache to catch up) is handled separately in
+    ``_DetectionTallyMixin._async_update_tally`` via the live-map
+    response's own ``taskBeginTime``, which is refetched every poll.
+    """
+    device = coordinator.device
+    if device is not None:
+        clean_id = getattr(device, "robot_clean_id", None)
+        if isinstance(clean_id, str):
+            return clean_id
+    return None
+
+
+async def _current_clean_id_via_cloud(
+    coordinator: DysonDataUpdateCoordinator,
+) -> str | None:
+    """Best-effort clean id via the cloud clean-history endpoint.
+
+    Only used for restore-after-HA-restart (``_restore_tally``), where a
+    result up to 10 minutes stale is acceptable — restore only needs to
+    answer "is this the same session that was running before the
+    restart", not detect a brand-new clean the instant it starts (that's
+    ``taskBeginTime``'s job, see ``_current_clean_id``). Reuses the same
+    ``fetch_clean_maps`` cache the last-clean sensors already populate, so
+    this adds no new network traffic in the common case.
+    """
+    cleans = await fetch_clean_maps(coordinator)
+    if not cleans:
+        return None
+    clean_id = getattr(cleans[0], "clean_id", None)
+    return clean_id if isinstance(clean_id, str) else None
+
+
+class _DetectionTallyMixin:
+    """Shared accumulate-and-dedupe logic for the three detection sensors.
+
+    Not a sensor itself — mixed into each of the three below, which differ
+    only in which live-map array they read and how they describe a point.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+    _attr_should_poll = True
+
+    def _init_tally_state(self) -> None:
+        self._seen_points: list[dict[str, Any]] = []
+        self._tracked_clean_id: str | None = None
+        # Separate from _tracked_clean_id: taskBeginTime comes from the
+        # live-map response itself (refetched every poll, no extra HTTP
+        # call), so it's the fast/reliable "did a new clean just start"
+        # signal used in _async_update_tally. _tracked_clean_id (MQTT or,
+        # failing that, the 10-minute-cached cloud history) is only used
+        # for cross-restart restore, where that lag doesn't matter.
+        self._tracked_task_begin_time: object = None
+
+    @property
+    def should_poll(self) -> bool:
+        # _attr_should_poll is inert on CoordinatorEntity subclasses (#408).
+        return True
+
+    async def _restore_tally(self, attrs: dict[str, Any]) -> None:
+        """Restore accumulated points from a prior HA session, same clean only.
+
+        Restoring across a HA restart mid-clean matters here specifically:
+        an in-progress clean's tally would otherwise silently reset to zero
+        on every restart even though the clean is still running. The
+        persisted ``clean_id`` was, until this fix, always None for a
+        device whose MQTT never reports ``cleanId`` — confirmed live, this
+        made restore never trigger and silently wiped the tally on every
+        restart. Falls back to the cloud clean-history endpoint (10-minute
+        cache, acceptable here — see ``_current_clean_id_via_cloud``) to
+        get a usable identity to restore against.
+        """
+        restored_clean_id = attrs.get("clean_id")
+        points = attrs.get("points")
+        if not isinstance(points, list):
+            return
+        if not isinstance(restored_clean_id, str):
+            restored_clean_id = await _current_clean_id_via_cloud(self.coordinator)
+        if isinstance(restored_clean_id, str):
+            self._tracked_clean_id = restored_clean_id
+            restored: list[dict[str, Any]] = []
+            for p in points:
+                if not isinstance(p, dict):
+                    continue
+                # The persisted attribute shape has no "_x"/"_y"/"_key" —
+                # those are internal-only, added by _async_update_tally when
+                # a point is first appended. Re-derive them here so restored
+                # points still dedupe correctly against the next poll.
+                described = dict(p)
+                key = self._point_key(p)
+                if isinstance(key, tuple):
+                    described["_x"], described["_y"] = key
+                else:
+                    described["_key"] = key
+                restored.append(described)
+            self._seen_points = restored
+        # _tracked_task_begin_time deliberately isn't persisted/restored: it
+        # only needs to catch a *change* going forward, and the "is not
+        # None" guard in _async_update_tally already stops the first poll
+        # after a restart from treating "no baseline yet" as "changed".
+
+    def _extract_points(self, live_data: dict) -> list[dict[str, Any]]:
+        """Return this sensor's array of points from the live-map response.
+
+        Overridden per subclass. Must return plain dicts with at least
+        numeric "x"/"y" keys for the default dedup to work; a subclass whose
+        array has no reliable x/y (e.g. spot zones, schema unconfirmed)
+        overrides ``_point_key`` instead of relying on proximity dedup.
+        """
+        raise NotImplementedError
+
+    def _describe_point(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Map one raw live-map point to the attribute shape this sensor stores."""
+        raise NotImplementedError
+
+    def _point_key(self, raw: dict[str, Any]) -> tuple[float, float] | str:
+        """Key used to test "already seen". Proximity-based by default.
+
+        Returns the raw (x, y) — matched against already-seen points within
+        _DETECTION_DEDUP_RADIUS_M, not exact equality, since the cloud's
+        reported coordinates for the same physical spot drift a few
+        centimetres between polls. Overridden with a structural key for
+        arrays without simple x/y coordinates (e.g. spot zones).
+        """
+        return (float(raw.get("x", 0.0)), float(raw.get("y", 0.0)))
+
+    def _already_seen(self, key: object) -> bool:
+        if isinstance(key, str):
+            return any(p.get("_key") == key for p in self._seen_points)
+        x, y = key
+        for p in self._seen_points:
+            px, py = p.get("_x"), p.get("_y")
+            if px is None or py is None:
+                continue
+            if math.dist((x, y), (px, py)) <= _DETECTION_DEDUP_RADIUS_M:
+                return True
+        return False
+
+    async def _async_update_tally(self) -> None:
+        from datetime import datetime, timezone
+
+        if not _is_cleaning(self.coordinator):
+            # Not mid-clean: leave the last completed clean's tally in place
+            # rather than clearing it — the sensor should keep reporting
+            # "what happened last clean" between cleans, only resetting when
+            # the *next* clean actually starts (see the clean_id check below).
+            return
+
+        clean_id = _current_clean_id(self.coordinator)
+        if clean_id is not None and clean_id != self._tracked_clean_id:
+            # MQTT reported a new session id — reliable when present, but
+            # confirmed absent for some devices/firmware (see
+            # _current_clean_id), so this is a secondary signal here.
+            self._seen_points = []
+            self._tracked_clean_id = clean_id
+
+        live_data = await _fetch_live_map_for_detections(self.coordinator)
+        if not live_data:
+            return
+
+        # Primary reset signal: taskBeginTime from the response we just
+        # fetched anyway (no extra round-trip), refreshed every poll —
+        # unlike clean_id, this is confirmed to actually change when a new
+        # clean starts, regardless of whether MQTT reports cleanId.
+        task_begin = live_data.get("taskBeginTime")
+        if (
+            task_begin is not None
+            and self._tracked_task_begin_time is not None
+            and task_begin != self._tracked_task_begin_time
+        ):
+            self._seen_points = []
+        if task_begin is not None:
+            self._tracked_task_begin_time = task_begin
+
+        now = datetime.now(timezone.utc).isoformat()
+        for raw in self._extract_points(live_data):
+            if not isinstance(raw, dict):
+                continue
+            key = self._point_key(raw)
+            if self._already_seen(key):
+                continue
+            described = self._describe_point(raw)
+            described["first_seen"] = now
+            if isinstance(key, tuple):
+                described["_x"], described["_y"] = key
+            else:
+                described["_key"] = key
+            self._seen_points.append(described)
+
+        self._attr_native_value = len(self._seen_points)
+        self._attr_extra_state_attributes = {
+            "clean_id": self._tracked_clean_id,
+            "last_updated": now,
+            "points": [
+                {k: v for k, v in p.items() if not k.startswith("_")}
+                for p in self._seen_points
+            ],
+        }
+
+
+class DysonRobotObstaclesSensor(
+    _DetectionTallyMixin, DysonEntity, RestoreEntity, SensorEntity
+):
+    """Count of distinct obstacles the robot has flagged during the current clean.
+
+    State: running count for the clean in progress (or the last completed
+    one, until a new clean starts). Attributes carry each point's
+    coordinates and when it was first seen.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._init_tally_state()
+        self._attr_unique_id = f"{coordinator.serial_number}_obstakels_deze_beurt"
+        self._attr_name = "Obstakels Deze Beurt"
+        self._attr_icon = "mdi:cone"
+        self._attr_native_value = 0
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last and last.state not in ("unknown", "unavailable"):
+            await self._restore_tally(dict(last.attributes))
+
+    async def async_update(self) -> None:
+        await self._async_update_tally()
+
+    def _extract_points(self, live_data: dict) -> list[dict[str, Any]]:
+        obstacles = live_data.get("obstacles")
+        return obstacles if isinstance(obstacles, list) else []
+
+    def _describe_point(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return {"x": raw.get("x"), "y": raw.get("y")}
+
+
+class DysonRobotDirtSensor(
+    _DetectionTallyMixin, DysonEntity, RestoreEntity, SensorEntity
+):
+    """Count of distinct dirt spots the robot has flagged during the current clean.
+
+    State: running count for the clean in progress (or the last completed
+    one, until a new clean starts). Attributes carry each spot's
+    coordinates, Dyson's own ``type`` classification (e.g. "solid") and
+    whether it was found via UV scan, plus when it was first seen.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._init_tally_state()
+        self._attr_unique_id = f"{coordinator.serial_number}_vieze_plekken_deze_beurt"
+        self._attr_name = "Vieze Plekken Deze Beurt"
+        self._attr_icon = "mdi:water-alert-outline"
+        self._attr_native_value = 0
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last and last.state not in ("unknown", "unavailable"):
+            await self._restore_tally(dict(last.attributes))
+
+    async def async_update(self) -> None:
+        await self._async_update_tally()
+
+    def _extract_points(self, live_data: dict) -> list[dict[str, Any]]:
+        dirt = live_data.get("dirt")
+        return dirt if isinstance(dirt, list) else []
+
+    def _describe_point(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "x": raw.get("x"),
+            "y": raw.get("y"),
+            "type": raw.get("type"),
+            "is_uv_scan_on": raw.get("isUvScanOn"),
+        }
+
+
+class DysonRobotSpotZonesSensor(
+    _DetectionTallyMixin, DysonEntity, RestoreEntity, SensorEntity
+):
+    """Count of distinct spot-clean zones flagged during the current clean.
+
+    ``spotZones`` has been empty in every live probe so far, so its schema
+    (beyond "a list of dict-like entries") is unconfirmed. Dedup therefore
+    falls back to a structural key (the entry's own sorted JSON form)
+    instead of assuming x/y coordinates like the other two sensors — this
+    still works once real entries start appearing, whatever their shape.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._init_tally_state()
+        self._attr_unique_id = f"{coordinator.serial_number}_spot_zones_deze_beurt"
+        self._attr_name = "Spot Zones Deze Beurt"
+        self._attr_icon = "mdi:target"
+        self._attr_native_value = 0
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last and last.state not in ("unknown", "unavailable"):
+            await self._restore_tally(dict(last.attributes))
+
+    async def async_update(self) -> None:
+        await self._async_update_tally()
+
+    def _extract_points(self, live_data: dict) -> list[dict[str, Any]]:
+        spot_zones = live_data.get("spotZones")
+        return spot_zones if isinstance(spot_zones, list) else []
+
+    def _point_key(self, raw: dict[str, Any]) -> str:
+        import json as _json
+
+        return _json.dumps(raw, sort_keys=True, default=str)
+
+    def _describe_point(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return dict(raw)
+
+
+# input_boolean.dyson_robot_reset_hervatten_na_complete_beurt (HA-side helper,
+# not part of this integration) controls whether a *fully finished* clean
+# clears the tally below for the next run. Read via hass.states.get() rather
+# than a config-entry-owned entity lookup (see button.py's
+# _selected_zone_names for that pattern) because this helper is a standalone
+# YAML-authored input_boolean with no relation to any Dyson config entry —
+# same idiom as climate.py's humidifier_entity_id lookup. Missing/unknown
+# defaults to "reset" (the same behaviour as the input_boolean's own
+# initial: true), matching this sensor's core safety rule: an unknown
+# setting should never cause fewer rooms to be tracked as done than the user
+# would see live in the app, and "reset" is the option that discards
+# leftover completion state entirely rather than risk it going stale.
+_RESET_AFTER_COMPLETE_ENTITY_ID = (
+    "input_boolean.dyson_robot_reset_hervatten_na_complete_beurt"
+)
+
+
+class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity):
+    """Zones that reached CLEAN_COMPLETE during the clean in progress.
+
+    ``vacuum.stop``/``return_to_base`` are the only ways to end a clean
+    early (see vacuum.py — both are aliases for the same ABORT command),
+    and there is no server-side "pause, resume later" for a partially
+    finished multi-room run. If someone comes home early, the next
+    departure-triggered clean would otherwise start every selected room
+    over from scratch, including ones the robot already finished. This
+    sensor tracks, per clean session, which zone ``name``s the live-map
+    endpoint (https://.../live-maps/cleaning) reported as
+    ``CLEAN_COMPLETE``, so an automation can skip already-done rooms on
+    the next departure trigger instead of re-cleaning them.
+
+    State: count of zones currently known complete. Attributes carry the
+    zone names themselves (what the departure automation actually needs)
+    plus bookkeeping for restore/reset.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+    _attr_should_poll = True
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._completed_zone_names: set[str] = set()
+        self._tracked_clean_id: str | None = None
+        # Refreshed every poll from the live-map response itself — see
+        # _DetectionTallyMixin._async_update_tally's docstring for why this
+        # is the primary new-clean signal and _tracked_clean_id (MQTT
+        # cleanId, structurally None on this device/firmware, or the
+        # 10-minute-cached cloud history as fallback) is secondary/restore-only.
+        self._tracked_task_begin_time: object = None
+        self._last_reset_date: object = None
+        self._attr_unique_id = f"{coordinator.serial_number}_kamers_al_klaar_deze_ronde"
+        self._attr_name = "Kamers Al Klaar Deze Ronde"
+        self._attr_icon = "mdi:progress-check"
+        self._attr_native_value = 0
+        self._attr_extra_state_attributes = {"zone_names": []}
+
+    @property
+    def should_poll(self) -> bool:
+        # _attr_should_poll is inert on CoordinatorEntity subclasses (#408),
+        # same caveat as _DetectionTallyMixin.
+        return True
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if not last or last.state in ("unknown", "unavailable"):
+            return
+        attrs = dict(last.attributes)
+        zone_names = attrs.get("zone_names")
+        if isinstance(zone_names, list):
+            self._completed_zone_names = {str(n) for n in zone_names}
+        restored_clean_id = attrs.get("clean_id")
+        if not isinstance(restored_clean_id, str):
+            restored_clean_id = await _current_clean_id_via_cloud(self.coordinator)
+        if isinstance(restored_clean_id, str):
+            self._tracked_clean_id = restored_clean_id
+        last_reset_date = attrs.get("last_reset_date")
+        if isinstance(last_reset_date, str):
+            self._last_reset_date = last_reset_date
+        self._publish_state()
+        # _tracked_task_begin_time deliberately isn't restored — same reason
+        # as _DetectionTallyMixin: it only needs to catch a *change* from
+        # here on, and the "is not None" guard below already stops the
+        # first poll after a restart from treating "no baseline yet" as
+        # "a new clean started".
+
+    def _reset_after_complete_run_enabled(self) -> bool:
+        state = self.hass.states.get(_RESET_AFTER_COMPLETE_ENTITY_ID)
+        if state is None or state.state not in ("on", "off"):
+            return True
+        return state.state == "on"
+
+    def _today_str(self) -> str:
+        return dt_util.now().date().isoformat()
+
+    def _publish_state(self) -> None:
+        self._attr_native_value = len(self._completed_zone_names)
+        self._attr_extra_state_attributes = {
+            "zone_names": sorted(self._completed_zone_names),
+            "clean_id": self._tracked_clean_id,
+            "last_reset_date": self._last_reset_date,
+        }
+
+    async def async_update(self) -> None:
+        today = self._today_str()
+
+        if not _is_cleaning(self.coordinator):
+            # Not mid-clean: a new calendar day (Europe/Amsterdam via HA's
+            # configured timezone, not bare UTC — matters here because the
+            # departure automation this feeds runs on local-day boundaries)
+            # is the fallback reset point when the reset-after-complete
+            # toggle is off, mirroring how sensor.robot_kamers_nog_niet_klaar_
+            # vandaag resets (Pi-side configuration.yaml, not this file).
+            if self._last_reset_date != today:
+                self._completed_zone_names = set()
+                self._tracked_clean_id = None
+                self._last_reset_date = today
+                self._publish_state()
+            return
+
+        clean_id = _current_clean_id(self.coordinator)
+        if clean_id is not None and clean_id != self._tracked_clean_id:
+            self._completed_zone_names = set()
+            self._tracked_clean_id = clean_id
+
+        live_data = await _fetch_live_map_for_detections(self.coordinator)
+        if not live_data:
+            return
+
+        task_begin = live_data.get("taskBeginTime")
+        started_new_clean = (
+            task_begin is not None
+            and self._tracked_task_begin_time is not None
+            and task_begin != self._tracked_task_begin_time
+        )
+        if started_new_clean:
+            self._completed_zone_names = set()
+        if task_begin is not None:
+            self._tracked_task_begin_time = task_begin
+
+        zones = live_data.get("zones")
+        if not isinstance(zones, list):
+            return
+
+        newly_complete: set[str] = set()
+        all_resolved = True
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            name = zone.get("name")
+            status = zone.get("cleanStatus")
+            if not isinstance(name, str):
+                continue
+            if status == "CLEAN_COMPLETE":
+                newly_complete.add(name)
+            elif status not in ("CLEAN_COMPLETE", "CANT_CLEAN"):
+                # CLEAN_NOT_REQUESTED/_PENDING/_IN_PROGRESS — run not fully
+                # resolved yet, so this poll can't be "the finish line" for
+                # the reset-after-complete-run check below.
+                all_resolved = False
+
+        self._completed_zone_names |= newly_complete
+
+        # A clean that resolved every selected zone (all CLEAN_COMPLETE or
+        # CANT_CLEAN, none still pending/in-progress) counts as a proper,
+        # non-aborted finish — vs. one interrupted by vacuum.stop, where the
+        # live-map endpoint simply stops being fetchable (404, handled by
+        # the `if not live_data: return` above, leaving the partial tally
+        # in place for next time on purpose). Only reset here, not on every
+        # poll where "no incomplete zones" happens to be momentarily true.
+        if all_resolved and zones and self._reset_after_complete_run_enabled():
+            self._completed_zone_names = set()
+            self._last_reset_date = today
+
+        self._publish_state()

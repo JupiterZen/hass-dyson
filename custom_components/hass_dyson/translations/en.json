@@ -261,6 +261,9 @@
       "robot_voice_download_status": {
         "name": "Voice Download Status"
       },
+      "robot_active_fault": {
+        "name": "Active Fault"
+      },
       "robot_full_clean_action": {
         "name": "Full Clean Action"
       },
