@@ -520,8 +520,16 @@ async def _setup_individual_device_entry(
         # Device doesn't support MQTT - schedule removal AFTER setup_lock is released.
         # Awaiting async_remove here would deadlock because async_setup_entry already
         # holds entry.setup_lock and async_remove tries to acquire the same lock.
-        _LOGGER.info(
-            "Scheduling removal of unsupported device '%s' (no MQTT support): %s",
+        #
+        # Logged at WARNING (not INFO): this is a permanent, destructive
+        # action (the config entry and all its entities disappear) that
+        # previously blended into the startup log noise. The coordinator
+        # already retries a transiently empty cloud response before raising
+        # this error, so by the time it gets here the removal is expected
+        # to be correct — but it is still worth a level that a user
+        # skimming logs will actually notice.
+        _LOGGER.warning(
+            "Removing config entry for '%s' — device reports no MQTT support: %s",
             entry.title,
             err,
         )

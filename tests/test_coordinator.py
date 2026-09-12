@@ -15,6 +15,7 @@ from custom_components.hass_dyson.const import (
     DISCOVERY_CLOUD,
     DISCOVERY_MANUAL,
     DISCOVERY_STICKER,
+    UnsupportedDeviceError,
 )
 from custom_components.hass_dyson.coordinator import DysonDataUpdateCoordinator
 
@@ -726,6 +727,146 @@ class TestDysonDataUpdateCoordinatorCloudSetup:
                     UpdateFailed, match="Cloud device setup failed: Auth failed"
                 ):
                     await coordinator._async_setup_cloud_device()
+
+    @pytest.mark.asyncio
+    async def test_async_setup_cloud_device_empty_config_recovers_on_retry(self):
+        """A transiently empty connected_configuration should not remove the device.
+
+        Regression test for a real incident: right after an unrelated
+        account-wide change (removing a different device from the Dyson
+        account on the website), the cloud API briefly returned a device
+        with no connected_configuration for an otherwise healthy, already
+        set up device. Without a retry this raised UnsupportedDeviceError
+        and the config entry was automatically and permanently removed on
+        the next Home Assistant restart.
+        """
+        with patch(
+            "custom_components.hass_dyson.coordinator.DataUpdateCoordinator.__init__"
+        ):
+            coordinator = DysonDataUpdateCoordinator.__new__(DysonDataUpdateCoordinator)
+            mock_config_entry = MagicMock()
+            mock_config_entry.data = {CONF_SERIAL_NUMBER: "TEST123456"}
+            coordinator.config_entry = mock_config_entry
+            coordinator._device_category = ["vacuum"]
+
+            mock_cloud_client = MagicMock()
+
+            # First response: no connected_configuration at all (the
+            # transient/incomplete state observed in practice).
+            empty_device_info = MagicMock()
+            empty_device_info.connection_category = "wifi"
+            empty_device_info.connected_configuration = None
+
+            # Second response (after retry): device is healthy again.
+            healthy_device_info = MagicMock()
+            healthy_device_info.connection_category = "wifi"
+            healthy_device_info.connected_configuration = MagicMock()
+
+            with patch.object(
+                coordinator,
+                "_authenticate_cloud_client",
+                return_value=mock_cloud_client,
+            ):
+                with patch.object(
+                    coordinator,
+                    "_find_cloud_device",
+                    side_effect=[empty_device_info, healthy_device_info],
+                ):
+                    with patch("asyncio.sleep", new=AsyncMock()):
+                        with patch.object(coordinator, "_extract_device_info"):
+                            with patch.object(
+                                coordinator,
+                                "_extract_mqtt_credentials",
+                                return_value={},
+                            ):
+                                with patch.object(
+                                    coordinator,
+                                    "_extract_cloud_credentials",
+                                    return_value={},
+                                ):
+                                    with patch.object(
+                                        coordinator, "_create_cloud_device"
+                                    ):
+                                        # Should NOT raise — the retry finds a
+                                        # healthy response before giving up.
+                                        await coordinator._async_setup_cloud_device()
+
+    @pytest.mark.asyncio
+    async def test_async_setup_cloud_device_persistently_empty_still_removed(self):
+        """A device that never has connected_configuration is still removed.
+
+        The retry must not mask a genuinely unsupported device — only give
+        it a couple of chances to prove it is actually unsupported.
+        """
+        with patch(
+            "custom_components.hass_dyson.coordinator.DataUpdateCoordinator.__init__"
+        ):
+            coordinator = DysonDataUpdateCoordinator.__new__(DysonDataUpdateCoordinator)
+            mock_config_entry = MagicMock()
+            mock_config_entry.data = {CONF_SERIAL_NUMBER: "TEST123456"}
+            coordinator.config_entry = mock_config_entry
+
+            mock_cloud_client = MagicMock()
+
+            always_empty_device_info = MagicMock()
+            always_empty_device_info.connection_category = "wifi"
+            always_empty_device_info.connected_configuration = None
+            always_empty_device_info.name = "Floor Cleaner"
+
+            with patch.object(
+                coordinator,
+                "_authenticate_cloud_client",
+                return_value=mock_cloud_client,
+            ):
+                with patch.object(
+                    coordinator,
+                    "_find_cloud_device",
+                    return_value=always_empty_device_info,
+                ):
+                    with patch("asyncio.sleep", new=AsyncMock()):
+                        with pytest.raises(UnsupportedDeviceError):
+                            await coordinator._async_setup_cloud_device()
+
+    @pytest.mark.asyncio
+    async def test_async_setup_cloud_device_le_c_only_skips_retry(self):
+        """lecOnly devices are removed immediately, without retrying.
+
+        Being BLE-only is a stable property of the device, not something
+        that would flap between retries, so retrying would only slow down
+        a setup that is expected to fail every time.
+        """
+        with patch(
+            "custom_components.hass_dyson.coordinator.DataUpdateCoordinator.__init__"
+        ):
+            coordinator = DysonDataUpdateCoordinator.__new__(DysonDataUpdateCoordinator)
+            mock_config_entry = MagicMock()
+            mock_config_entry.data = {CONF_SERIAL_NUMBER: "TEST123456"}
+            coordinator.config_entry = mock_config_entry
+
+            mock_cloud_client = MagicMock()
+
+            ble_only_device_info = MagicMock()
+            ble_only_device_info.connection_category = "lecOnly"
+            ble_only_device_info.connected_configuration = None
+            ble_only_device_info.name = "BLE Light"
+
+            with patch.object(
+                coordinator,
+                "_authenticate_cloud_client",
+                return_value=mock_cloud_client,
+            ):
+                with patch.object(
+                    coordinator,
+                    "_find_cloud_device",
+                    return_value=ble_only_device_info,
+                ) as mock_find:
+                    with patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
+                        with pytest.raises(UnsupportedDeviceError):
+                            await coordinator._async_setup_cloud_device()
+                        # _find_cloud_device was only called once (the
+                        # initial lookup) — no retry attempts for lecOnly.
+                        assert mock_find.call_count == 1
+                        mock_sleep.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_authenticate_cloud_client_with_token(self):

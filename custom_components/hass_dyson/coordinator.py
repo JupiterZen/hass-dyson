@@ -938,14 +938,36 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             device_info = await self._find_cloud_device(cloud_client)
 
             # Check if device has MQTT support BEFORE extracting device info
-            # to avoid unnecessary API calls for unsupported devices
+            # to avoid unnecessary API calls for unsupported devices.
+            #
+            # A missing/empty connected_configuration can mean two very
+            # different things: (a) this device genuinely has no connected
+            # configuration (e.g. lecOnly devices, handled above via
+            # connection_category), or (b) the cloud API returned a
+            # transiently incomplete response — observed in practice right
+            # after an unrelated account-wide change (e.g. removing another
+            # device from the account on the Dyson website), which can make
+            # the device list briefly inconsistent. Since (b) leads straight
+            # to automatic, permanent removal of the config entry (see the
+            # UnsupportedDeviceError handling in __init__.py), treat an
+            # empty connected_configuration as retryable for a device that
+            # was reachable before (i.e. not a brand-new discovery), rather
+            # than assuming case (a) on the first empty response.
+            if not self._device_has_mqtt_support(device_info):
+                connection_category = getattr(device_info, "connection_category", None)
+                if connection_category != "lecOnly":
+                    device_info = await self._retry_for_mqtt_support(
+                        cloud_client, device_info
+                    )
+
             if not self._device_has_mqtt_support(device_info):
                 connection_category = getattr(
                     device_info, "connection_category", "unknown"
                 )
-                _LOGGER.info(
-                    "Device %s (%s) does not have MQTT support (connectivity: %s). "
-                    "This device will be automatically removed from Home Assistant.",
+                _LOGGER.warning(
+                    "Device %s (%s) still has no MQTT support after retrying "
+                    "(connectivity: %s). This device will be automatically "
+                    "removed from Home Assistant.",
                     self.serial_number,
                     getattr(device_info, "name", "Unknown"),
                     connection_category,
@@ -1104,6 +1126,52 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return device
 
         raise UpdateFailed(f"Device {self.serial_number} not found in cloud account")
+
+    async def _retry_for_mqtt_support(
+        self, cloud_client, device_info, attempts: int = 2, delay_seconds: float = 5.0
+    ):
+        """Re-fetch device info a few times if connected_configuration is empty.
+
+        Guards against a genuinely unsupported device being confused with a
+        transiently incomplete cloud API response. Observed in practice: the
+        device list returned by the Dyson cloud account can be briefly
+        inconsistent right after an unrelated account-wide change (e.g.
+        removing a different device from the account via the Dyson website),
+        which — without this retry — caused a working device's config entry
+        to be automatically and permanently removed on the next Home
+        Assistant restart, with no error-level log at the time it happened.
+
+        Only called for devices that are not lecOnly (see caller); a
+        genuinely BLE-only device is a stable property of the device, not
+        something that would flap between retries.
+        """
+        for attempt in range(1, attempts + 1):
+            _LOGGER.info(
+                "Device %s has no connected_configuration on attempt %d/%d — "
+                "retrying in %.0fs before treating it as unsupported",
+                self.serial_number,
+                attempt,
+                attempts,
+                delay_seconds,
+            )
+            await asyncio.sleep(delay_seconds)
+            try:
+                device_info = await self._find_cloud_device(cloud_client)
+            except UpdateFailed:
+                # Device disappeared from the account entirely (e.g. the
+                # user genuinely removed it) — no point retrying further,
+                # let the normal "not found" handling take over upstream.
+                raise
+            if self._device_has_mqtt_support(device_info):
+                _LOGGER.info(
+                    "Device %s has connected_configuration again after retry "
+                    "%d/%d — was a transient cloud API response",
+                    self.serial_number,
+                    attempt,
+                    attempts,
+                )
+                return device_info
+        return device_info
 
     def _extract_device_info(self, device_info) -> None:
         """Extract device category and capabilities from device info."""
