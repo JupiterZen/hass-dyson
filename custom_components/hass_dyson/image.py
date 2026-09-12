@@ -1039,6 +1039,9 @@ def _render_live_map_png(
                     pt = seg.get(key) or {}
                     if pt.get("x") is not None and pt.get("y") is not None:
                         points.append((float(pt["x"]), float(pt["y"])))
+            for pt in zone.get("visited") or []:
+                if isinstance(pt, dict) and pt.get("x") is not None:
+                    points.append((float(pt["x"]), float(pt["y"])))
         for item in furniture:
             if not isinstance(item, dict):
                 continue
@@ -1103,6 +1106,26 @@ def _render_live_map_png(
                 status = zone.get("cleanStatus")
                 fill = _ZONE_STATUS_FILL_RGBA.get(status, _ZONE_STATUS_FALLBACK_RGBA)
                 draw.polygon(poly, fill=fill)
+
+        # Actually-visited footprint per zone — a point cloud (not a closed
+        # polygon) tracing the robot's real coverage, e.g. hugging furniture
+        # or stopping short of an obstacle, unlike the straight-line
+        # ``presentation`` room boundary. Confirmed live (12 sep 2026): this
+        # is the same organic, non-rectangular shape the MyDyson app shows
+        # for a finished run. Drawn as a light overlay dot per point rather
+        # than a filled polygon — the raw points aren't ordered as a
+        # traceable outline, only dense enough (~2-5cm spacing) to read as
+        # one at this resolution.
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            for pt in zone.get("visited") or []:
+                if not isinstance(pt, dict) or pt.get("x") is None:
+                    continue
+                vx, vy = _world_to_px(float(pt["x"]), float(pt["y"]))
+                draw.rectangle(
+                    [vx - 1, vy - 1, vx + 1, vy + 1], fill=(255, 255, 255, 90)
+                )
 
         # Zone outlines (same wall/room-separator distinction as the v2 renderer).
         for zone in zones:

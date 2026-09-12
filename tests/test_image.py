@@ -1704,6 +1704,50 @@ class TestRenderLiveMapPng:
         # full -5..5 range (plus margin), not just the zone's -1..1 outline.
         assert min(img.size) > 300
 
+    def test_visited_footprint_alone_returns_png(self):
+        """A zone's visited point cloud alone (no presentation lines)
+        renders a PNG.
+
+        Confirmed live (12 sep 2026): this organic, non-rectangular point
+        cloud tracing the robot's actual coverage — not the straight-line
+        room boundary — is what the MyDyson app shows for a finished run.
+        """
+        data = {
+            "zones": [
+                {
+                    "id": "1",
+                    "name": "Keuken",
+                    "cleanStatus": "CLEAN_COMPLETE",
+                    "presentation": [],
+                    "visited": [
+                        {"x": -0.5, "y": -0.5},
+                        {"x": -0.45, "y": -0.5},
+                        {"x": -0.4, "y": -0.45},
+                    ],
+                }
+            ]
+        }
+        result = _render_live_map_png(data)
+        assert result is not None
+        assert result[:4] == b"\x89PNG"
+
+    def test_visited_footprint_changes_pixels(self):
+        """The visited overlay visibly changes the render vs. zone alone."""
+        zone_only = _render_live_map_png({"zones": [self._make_zone()]})
+        zone = self._make_zone()
+        zone["visited"] = [{"x": 0.0, "y": 0.0}, {"x": 0.1, "y": 0.1}]
+        with_visited = _render_live_map_png({"zones": [zone]})
+        assert zone_only != with_visited
+
+    def test_visited_extends_bounding_box(self):
+        """visited points outside the zone outline still fit on canvas."""
+        zone = self._make_zone()
+        zone["visited"] = [{"x": -5.0, "y": -5.0}, {"x": 5.0, "y": 5.0}]
+        result = _render_live_map_png({"zones": [zone]})
+        assert result is not None
+        img = Image.open(io.BytesIO(result))
+        assert min(img.size) > 300
+
 
 class TestRenderV2MapPng:
     """Test the v2 clean-maps-data PNG renderer."""
