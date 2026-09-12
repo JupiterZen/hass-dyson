@@ -41,11 +41,13 @@ Bitmap rendering ported from thoukydides/matterbridge-dyson-robot
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
 import json
 import logging
+import math
 import zlib
 from datetime import datetime, timezone
 from functools import partial
@@ -127,6 +129,23 @@ async def async_setup_entry(
 _persist_map_cache = TTLCache(6 * 3600)
 _map_image_cache = TTLCache(10 * 60)
 _floor_plan_cache = TTLCache(6 * 3600)
+
+# _fetch_live_map_cleaning is polled every ~30s by the floor-plan image
+# entity AND separately by the three per-clean detection sensors (see
+# _fetch_live_map_for_detections in sensor.py), and the HA frontend/
+# companion app additionally fires its own async_image() requests whenever
+# the floor-plan picture is displayed — confirmed live (5-6 sep 2026) that
+# these can land within a few hundred milliseconds of each other. Without
+# any sharing, each of these callers hit Dyson's cloud independently;
+# confirmed via live debug logging that this reliably triggers 429 Too Many
+# Requests from appapi.cp.dyson.com, which then makes the floor plan fall
+# back to the stale zone-outline renderer — visible to the user as the
+# plattegrond flickering between coloured and blank. A per-serial lock
+# (same pattern as vacuum.py's _clean_maps_locks) plus a short TTL cache
+# fixes this: concurrent callers within the same burst share one fetch
+# instead of each firing their own.
+_live_map_cache = TTLCache(3)
+_live_map_locks: dict[str, asyncio.Lock] = {}
 
 
 async def _fetch_map_image(
@@ -320,27 +339,78 @@ async def _fetch_live_map_cleaning(
     correct per-zone status source — better than inferring progress from
     MQTT ``FULL_CLEAN_DISCOVERING`` transitions.
 
-    Deliberately uncached: the endpoint itself is session-bound (returns
-    HTTP 404 once the robot is docked/no active clean session exists), so
-    there's nothing stable to cache — every call either reflects the
-    current live state or fails outright, and a stale cached frame would
-    be actively misleading here (unlike the 6-hour zone-geometry cache
-    used elsewhere, which is safe because geometry rarely changes).
+    Cached for a short 3s TTL, plus a per-serial lock so concurrent callers
+    share one in-flight fetch. NOT for the reason the other caches in this
+    module exist (geometry that rarely changes) — this endpoint's data is
+    genuinely live and a stale frame is undesirable in principle. But
+    leaving it fully uncached, as an earlier version of this function did,
+    was confirmed (5-6 sep 2026, live debug logging) to make Dyson's cloud
+    return 429 Too Many Requests once the floor-plan image entity's own
+    30s poll, the three per-clean detection sensors, and the HA frontend's
+    own async_image() requests all hit this endpoint independently within
+    the same few-hundred-millisecond burst — and a 429 falls back to the
+    stale zone-outline renderer, which is far more visibly wrong (a
+    flickering, occasionally blank floor plan) than a live map that is up
+    to 3 seconds old. 3 seconds is short enough that a viewer watching the
+    plattegrond cannot distinguish it from "current", and comfortably
+    covers the burst window observed live — it is not meant to survive
+    across the ~30s poll interval, only within one burst of it.
+    """
+    serial = coordinator.serial_number
+
+    fresh = _live_map_cache.get(serial)
+    if fresh is not None:
+        return fresh
+
+    if serial not in _live_map_locks:
+        _live_map_locks[serial] = asyncio.Lock()
+
+    async with _live_map_locks[serial]:
+        # Re-check after acquiring the lock — a concurrent caller may have
+        # already populated the cache while we were waiting on it, which is
+        # the whole point of the lock (share one fetch, not queue N of them).
+        fresh = _live_map_cache.get(serial)
+        if fresh is not None:
+            return fresh
+
+        async with coordinator.async_cloud_client() as client:
+            if client is None:
+                return None
+            data = await _fetch_live_map_cleaning_once(client, serial)
+            if data is None:
+                return None
+            _live_map_cache.set(serial, data)
+            return data
+
+
+async def _fetch_live_map_cleaning_once(client, serial: str) -> dict | None:
+    """Single fetch attempt for ``_fetch_live_map_cleaning``, with one 429 retry.
+
+    A 429 is specifically transient (Dyson's cloud rate-limiting a burst,
+    not a genuine "no data" condition like a 404 once docked), so it is
+    worth one short retry before giving up — unlike other API errors, which
+    fail straight through to the caller's existing fallback chain. Kept to
+    a single retry with a fixed ~1s backoff deliberately: the TTL cache
+    above already absorbs the vast majority of what used to cause 429s, so
+    this is a small additional safety net, not a general-purpose retry
+    framework.
     """
     from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
 
-    async with coordinator.async_cloud_client() as client:
-        if client is None:
-            return None
+    for attempt in range(2):
         try:
-            return await client.get_live_map_cleaning(coordinator.serial_number)
+            return await client.get_live_map_cleaning(serial)
         except (DysonAPIError, DysonAuthError) as err:
+            if attempt == 0 and "429" in str(err):
+                await asyncio.sleep(1)
+                continue
             _LOGGER.debug(
                 "Live map (cleaning) fetch failed for %s: %s",
-                coordinator.serial_number,
+                serial,
                 err,
             )
             return None
+    return None
 
 
 async def _fetch_persist_map(coordinator: DysonDataUpdateCoordinator, map_id: str):
@@ -723,9 +793,16 @@ def _render_v2_floor_plan_png(
                                "end":   {"x": float, "y": float},
                                "type":   int}]}
           ],
+          "cleanPath": [{"x": float, "y": float, "update": int}],
           "dockLocation": {"x": float, "y": float, "angle": float},
           "orientation": int
         }
+
+    ``cleanPath`` (this run's driven route) is drawn as a translucent blue
+    line, same styling as ``_render_v2_map_png``'s dust-map overlay — but
+    independent of ``dustMap``, which Dyson's cloud never populates for this
+    device family (confirmed structurally, see ``dyson/CLAUDE.md``). Drawing
+    it here means the route shows up even though the dust heatmap never will.
 
     ``robot_position``, when given, is ``(x, y, angle)`` in the same world
     metres as ``dockLocation`` — the robot's most recent ``globalPosition``
@@ -789,6 +866,22 @@ def _render_v2_floor_plan_png(
                     draw.line([sx, sy, ex, ey], fill=(130, 130, 130, 255), width=1)
                 has_lines = True
 
+        # Driven route for this clean — translucent blue line, drawn after
+        # the zone lines but before the dock/robot markers so those stay on
+        # top. Independent of dustMap (see docstring) — this is what makes
+        # the route visible at all for this device family.
+        clean_path = data.get("cleanPath") or []
+        has_path = False
+        if clean_path and resolution > 0:
+            pts = [
+                _world_to_px(float(p.get("x") or 0), float(p.get("y") or 0))
+                for p in clean_path
+                if isinstance(p, dict)
+            ]
+            if len(pts) > 1:
+                draw.line(pts, fill=(30, 144, 255, 200), width=2)
+                has_path = True
+
         # Dock location — green filled circle
         dock = data.get("dockLocation")
         has_dock = isinstance(dock, dict) and dock.get("x") is not None
@@ -815,16 +908,15 @@ def _render_v2_floor_plan_png(
                 # Heading tick: short line from centre in the facing direction.
                 # World angle is radians, image Y grows downward — negate for
                 # the on-screen rotation to match world convention.
-                import math
-
                 tick_len = 10
                 tx = px + tick_len * math.cos(angle)
                 ty = py - tick_len * math.sin(angle)
                 draw.line([px, py, tx, ty], fill=(10, 50, 150, 255), width=2)
 
-        if not has_lines and not has_dock and not has_robot:
+        if not has_lines and not has_path and not has_dock and not has_robot:
             _LOGGER.debug(
-                "v2 floor plan: no zones, dock location, or robot position in response"
+                "v2 floor plan: no zones, clean path, dock location, or robot"
+                " position in response"
             )
             return None
 
@@ -867,10 +959,20 @@ _ZONE_STATUS_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
 }
 _ZONE_STATUS_FALLBACK_RGBA: tuple[int, int, int, int] = (235, 235, 235, 255)
 
+# Per-spot fill colour keyed by the ``dirt[].type`` value from the same
+# endpoint. Confirmed value (6 sep 2026 live probe, mid-clean): "solid".
+# Unknown/future values fall back to _DIRT_TYPE_FALLBACK_RGBA rather than
+# being skipped, same reasoning as _ZONE_STATUS_FALLBACK_RGBA above.
+_DIRT_TYPE_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
+    "solid": (120, 90, 40, 255),  # dark ochre — distinct from every zone/furniture hue
+}
+_DIRT_TYPE_FALLBACK_RGBA: tuple[int, int, int, int] = (120, 90, 40, 255)
+
 
 def _render_live_map_png(
     data: dict,
     rotation_deg: int = 0,
+    is_returning: bool = False,
 ) -> bytes | None:
     """Render a live-map PNG from ``GET /v1/app/{serial}/live-maps/cleaning``.
 
@@ -889,11 +991,24 @@ def _render_live_map_png(
     resolution and a small margin, rather than trusting a server-provided
     canvas size that doesn't exist for this endpoint.
 
+    ``is_returning`` marks the short window after a ``vacuum.stop``
+    command, while the robot is still driving back to the dock (confirmed
+    live: the live-maps/cleaning endpoint keeps returning fresh data for
+    roughly the duration of the drive, not just during an active clean).
+    The zone-status colouring is left as-is — it still shows what got
+    done/skipped this clean, which stays useful while the robot heads
+    back — but the robot marker switches to violet (instead of the
+    in-progress blue) and gains a dashed line to the dock, so it's
+    obvious at a glance that this is "driving home", not "still
+    cleaning".
+
     JSON fields used: ``zones`` (list of ``{id, name, cleanStatus,
     presentation: [{start, end, type}]}``), ``furniture`` (list of
     ``{type, points: [{x, y}, ...]}`` polygons), ``restrictions`` (list of
     ``{points, behavior}`` polygons), ``dockLocation`` (``{x, y, angle}``),
-    ``robotLocation`` (``{x, y, angle}``), ``orientation`` (int).
+    ``robotLocation`` (``{x, y, angle}``), ``orientation`` (int),
+    ``obstacles`` (list of ``{x, y}``), ``dirt`` (list of ``{x, y, type,
+    isUvScanOn}``).
     """
     try:
         from PIL import Image, ImageDraw
@@ -905,6 +1020,8 @@ def _render_live_map_png(
         zones = data.get("zones") or []
         furniture = data.get("furniture") or []
         restrictions = data.get("restrictions") or []
+        obstacles = data.get("obstacles") or []
+        dirt = data.get("dirt") or []
         dock = data.get("dockLocation")
         robot = data.get("robotLocation")
 
@@ -933,6 +1050,12 @@ def _render_live_map_png(
             for pt in item.get("points") or []:
                 if isinstance(pt, dict) and pt.get("x") is not None:
                     points.append((float(pt["x"]), float(pt["y"])))
+        for item in obstacles:
+            if isinstance(item, dict) and item.get("x") is not None:
+                points.append((float(item["x"]), float(item["y"])))
+        for item in dirt:
+            if isinstance(item, dict) and item.get("x") is not None:
+                points.append((float(item["x"]), float(item["y"])))
         if isinstance(dock, dict) and dock.get("x") is not None:
             points.append((float(dock["x"]), float(dock["y"])))
         if isinstance(robot, dict) and robot.get("x") is not None:
@@ -1026,6 +1149,34 @@ def _render_live_map_png(
             if len(poly) >= 3:
                 draw.polygon(poly, outline=(200, 40, 40, 255))
 
+        # Dirt spots — small filled circles, drawn before obstacles so an
+        # obstacle marker on top always stays visible if the two overlap.
+        for item in dirt:
+            if not isinstance(item, dict) or item.get("x") is None:
+                continue
+            dx, dy = _world_to_px(float(item["x"]), float(item["y"]))
+            fill = _DIRT_TYPE_FILL_RGBA.get(item.get("type"), _DIRT_TYPE_FALLBACK_RGBA)
+            draw.ellipse([dx - 4, dy - 4, dx + 4, dy + 4], fill=fill)
+            if item.get("isUvScanOn"):
+                # Subtle light ring — a secondary signal, not meant to dominate.
+                draw.ellipse(
+                    [dx - 5, dy - 5, dx + 5, dy + 5],
+                    outline=(255, 255, 255, 180),
+                )
+
+        # Obstacles — small upward-pointing triangle, echoing the cone icon
+        # the MyDyson app uses for the same data.
+        for item in obstacles:
+            if not isinstance(item, dict) or item.get("x") is None:
+                continue
+            ox, oy = _world_to_px(float(item["x"]), float(item["y"]))
+            r = 5
+            draw.polygon(
+                [(ox, oy - r), (ox - r, oy + r), (ox + r, oy + r)],
+                fill=(255, 150, 0, 255),
+                outline=(160, 90, 0, 255),
+            )
+
         # Dock — green filled circle.
         if isinstance(dock, dict) and dock.get("x") is not None:
             dx, dy = _world_to_px(float(dock["x"]), float(dock["y"]))
@@ -1035,22 +1186,53 @@ def _render_live_map_png(
                 outline=(0, 120, 40, 255),
             )
 
-        # Robot — blue dot with heading tick, drawn last so it's always visible.
+        # While returning, draw a dashed line from the robot to the dock —
+        # gives an at-a-glance sense of "heading there" before the marker
+        # colour alone would (short dashes so it doesn't compete visually
+        # with the zone-boundary lines drawn above).
+        if (
+            is_returning
+            and isinstance(dock, dict)
+            and dock.get("x") is not None
+            and isinstance(robot, dict)
+            and robot.get("x") is not None
+        ):
+            rx0, ry0 = _world_to_px(float(robot["x"]), float(robot["y"]))
+            dx0, dy0 = _world_to_px(float(dock["x"]), float(dock["y"]))
+            seg_len = 8
+            gap_len = 6
+            total = math.hypot(dx0 - rx0, dy0 - ry0)
+            if total > 0:
+                steps = int(total // (seg_len + gap_len)) + 1
+                for i in range(steps):
+                    t0 = min(1.0, (i * (seg_len + gap_len)) / total)
+                    t1 = min(1.0, (i * (seg_len + gap_len) + seg_len) / total)
+                    if t0 >= 1.0:
+                        break
+                    sx = rx0 + (dx0 - rx0) * t0
+                    sy = ry0 + (dy0 - ry0) * t0
+                    ex = rx0 + (dx0 - rx0) * t1
+                    ey = ry0 + (dy0 - ry0) * t1
+                    draw.line([sx, sy, ex, ey], fill=(150, 60, 220, 255), width=2)
+
+        # Robot — blue dot with heading tick while cleaning, violet while
+        # returning to the dock (see is_returning docstring note above) —
+        # drawn last so it's always visible.
         if isinstance(robot, dict) and robot.get("x") is not None:
             rx, ry = _world_to_px(float(robot["x"]), float(robot["y"]))
+            robot_fill = (150, 60, 220, 255) if is_returning else (30, 100, 240, 255)
+            robot_outline = (90, 20, 150, 255) if is_returning else (10, 50, 150, 255)
             draw.ellipse(
                 [rx - 7, ry - 7, rx + 7, ry + 7],
-                fill=(30, 100, 240, 255),
-                outline=(10, 50, 150, 255),
+                fill=robot_fill,
+                outline=robot_outline,
             )
             angle = robot.get("angle")
             if angle is not None:
-                import math
-
                 tick_len = 12
                 tx = rx + tick_len * math.cos(float(angle))
                 ty = ry - tick_len * math.sin(float(angle))
-                draw.line([rx, ry, tx, ty], fill=(10, 50, 150, 255), width=2)
+                draw.line([rx, ry, tx, ty], fill=robot_outline, width=2)
 
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug("Live map rendering failed: %s", err)
@@ -1297,20 +1479,30 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
         # While a clean is actively running, prefer the live-maps/cleaning
         # endpoint: it carries per-zone cleanStatus, furniture and
         # restriction-zone geometry that the completed-clean sources below
-        # don't have at all. Only attempted while cleaning — this endpoint
-        # 404s once the robot is docked/idle (confirmed via probe, see
-        # dyson/notes/06-...md), so there's no point calling it otherwise.
-        # Never cached (see _fetch_live_map_cleaning) and always retried on
-        # failure — a transient miss here should fall through to the
+        # don't have at all. Also attempted while RETURNING (the window
+        # right after a vacuum.stop command, robot driving back to the
+        # dock) — confirmed live that this endpoint keeps returning fresh
+        # data for roughly that whole drive, not just during an active
+        # clean, and showing the live map with the robot visibly heading
+        # home is more useful here than falling back to the static
+        # completed-clean render. Not attempted for any other activity —
+        # this endpoint 404s once the robot is docked/idle (confirmed via
+        # probe, see dyson/notes/06-...md), so there's no point calling it
+        # otherwise. Short-lived cache only (see _fetch_live_map_cleaning)
+        # — a genuine miss/failure here should still fall through to the
         # completed-clean renderer below, not surface as "no floor plan".
         device = self.coordinator.device
         if device is not None:
             ha_activity = ROBOT_STATE_TO_HA_STATE.get(device.robot_state)
-            if ha_activity == VacuumActivity.CLEANING:
+            if ha_activity in (VacuumActivity.CLEANING, VacuumActivity.RETURNING):
                 live_data = await _fetch_live_map_cleaning(self.coordinator)
                 if live_data:
                     rotation = int(live_data.get("orientation") or 0)
-                    png = _render_live_map_png(live_data, rotation)
+                    png = _render_live_map_png(
+                        live_data,
+                        rotation,
+                        is_returning=ha_activity == VacuumActivity.RETURNING,
+                    )
                     if png is not None:
                         self._attr_image_last_updated = datetime.now(timezone.utc)
                         return png
