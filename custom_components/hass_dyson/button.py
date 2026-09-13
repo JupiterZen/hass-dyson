@@ -178,6 +178,10 @@ async def async_setup_entry(
             DysonReconnectButton(coordinator),
             DysonRefreshZonesButton(coordinator, _async_discover_zone_buttons),
             DysonStartSelectedZonesButton(coordinator),
+            DysonDockStopButton(coordinator),
+            DysonDockDelayButton(coordinator),
+            DysonDockEmptyBinButton(coordinator),
+            DysonDockWashDryButton(coordinator),
         ],
         True,
     )
@@ -332,6 +336,126 @@ class DysonReconnectButton(DysonEntity, ButtonEntity):
         except Exception as err:
             _LOGGER.error(
                 "Failed to manually reconnect %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonDockStopButton(DysonEntity, ButtonEntity):
+    """Stop the dock's current wash/dry maintenance cycle immediately.
+
+    Mirrors the app's "Stop" button on the dock — sends
+    ABORT-DOCK-ACTION with no delay. See
+    ``dyson/robot-probe/README.md``, section "OPGELOST" (ABORT-DOCK-
+    ACTION), for how this command was reverse-engineered.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the dock stop button."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_dock_stop"
+        self._attr_translation_key = "dock_stop"
+        self._attr_icon = "mdi:stop-circle-outline"
+
+    async def async_press(self) -> None:
+        """Send ABORT-DOCK-ACTION with no delay."""
+        try:
+            await self.coordinator.device.robot_abort_dock_action()
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to stop dock action for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonDockDelayButton(DysonEntity, ButtonEntity):
+    """Delay the dock's current wash/dry maintenance cycle by 15 minutes.
+
+    Mirrors the app's "Vertragen" (15m) button. The app's picker also
+    offers 30/60/120 minutes, but only 15 has been confirmed live
+    against a real robot — see ``dyson/robot-probe/README.md``, section
+    "Volledige specificatie van ABORT-DOCK-ACTION".
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the dock delay button."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_dock_delay_15m"
+        self._attr_translation_key = "dock_delay_15m"
+        self._attr_icon = "mdi:clock-outline"
+
+    async def async_press(self) -> None:
+        """Send ABORT-DOCK-ACTION with delay=15."""
+        try:
+            await self.coordinator.device.robot_abort_dock_action(delay_minutes=15)
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to delay dock action for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonDockEmptyBinButton(DysonEntity, ButtonEntity):
+    """Start the dock's 'empty the bin' maintenance action on demand.
+
+    Mirrors the app's "Leeg reservoir" button — sends START-DOCK-ACTION
+    with action "COLLECT_DUST". See ``dyson/robot-probe/README.md``,
+    section "OPGELOST: 'Leeg reservoir'...".
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the dock empty-bin button."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_dock_empty_bin"
+        self._attr_translation_key = "dock_empty_bin"
+        self._attr_icon = "mdi:delete-empty-outline"
+
+    async def async_press(self) -> None:
+        """Send START-DOCK-ACTION with action COLLECT_DUST."""
+        try:
+            await self.coordinator.device.robot_start_dock_action(action="COLLECT_DUST")
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to start empty-bin dock action for %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+
+
+class DysonDockWashDryButton(DysonEntity, ButtonEntity):
+    """Start the dock's full wash-and-dry maintenance cycle on demand.
+
+    Mirrors the app's "Wassen en drogen" button — sends START-DOCK-ACTION
+    with action "WASH_MOP". Starts the full cycle from the beginning
+    (wash, then dry) regardless of recent cleaning status. See
+    ``dyson/robot-probe/README.md``, section "OPGELOST: 'Wassen en
+    drogen'...".
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the dock wash-and-dry button."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_dock_wash_dry"
+        self._attr_translation_key = "dock_wash_dry"
+        self._attr_icon = "mdi:washing-machine"
+
+    async def async_press(self) -> None:
+        """Send START-DOCK-ACTION with action WASH_MOP."""
+        try:
+            await self.coordinator.device.robot_start_dock_action(action="WASH_MOP")
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to start wash-and-dry dock action for %s: %s",
                 self.coordinator.serial_number,
                 err,
             )

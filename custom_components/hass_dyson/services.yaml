@@ -195,3 +195,64 @@ set_zone_behaviour:
       example: Downstairs
       selector:
         text:
+
+abort_dock_action:
+  name: Stop or Delay Dock Action
+  description: >-
+    Stop or delay the dock's current wash/dry maintenance cycle on a Dyson
+    robot vacuum — the same command as the app's "Stop" and "Vertragen"
+    (delay) buttons on the dock. Reverse-engineered from the MyDyson app's
+    own MQTT traffic (see dyson/robot-probe/README.md).
+  fields:
+    device_id:
+      name: Device
+      description: The Dyson robot vacuum device.
+      required: true
+      selector:
+        device:
+          integration: hass_dyson
+    delay_minutes:
+      name: Delay (minutes)
+      description: >-
+        When set, delays the dock action by this many minutes instead of
+        stopping it immediately (the app's "Vertragen" button). Only 15
+        has been confirmed against a real robot; the app's picker also
+        offers 30/60/120 but those are untested. When omitted, stops the
+        dock action immediately (the app's "Stop" button).
+      required: false
+      example: 15
+      selector:
+        number:
+          min: 1
+          max: 120
+          unit_of_measurement: minutes
+
+start_dock_action:
+  name: Start Dock Action
+  description: >-
+    Start a dock maintenance action on demand on a Dyson robot vacuum — the
+    same command as the app's "Leeg reservoir" and "Wassen en drogen"
+    buttons. Reverse-engineered from the MyDyson app's own MQTT traffic
+    (see dyson/robot-probe/README.md).
+  fields:
+    device_id:
+      name: Device
+      description: The Dyson robot vacuum device.
+      required: true
+      selector:
+        device:
+          integration: hass_dyson
+    action:
+      name: Action
+      description: >-
+        Which dock action to start. COLLECT_DUST empties the bin (the
+        app's "Leeg reservoir" button); WASH_MOP runs the full
+        wash-and-dry cycle from the start (the app's "Wassen en drogen"
+        button), regardless of recent cleaning status.
+      required: false
+      default: COLLECT_DUST
+      selector:
+        select:
+          options:
+            - COLLECT_DUST
+            - WASH_MOP

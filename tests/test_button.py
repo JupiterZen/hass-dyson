@@ -12,6 +12,10 @@ from libdyson_rest.models import PersistentMapMeta, ZoneMeta
 from custom_components.hass_dyson.button import (
     MANIFEST_REFRESH_DEBOUNCE,
     ZONE_DISCOVERY_RETRY_DELAYS,
+    DysonDockDelayButton,
+    DysonDockEmptyBinButton,
+    DysonDockStopButton,
+    DysonDockWashDryButton,
     DysonReconnectButton,
     DysonRefreshZonesButton,
     DysonStartSelectedZonesButton,
@@ -262,6 +266,97 @@ class TestDysonReconnectButton:
         assert button.coordinator == mock_coordinator
 
 
+class TestDysonDockButtons:
+    """Test the four dock-maintenance buttons (Stop/Vertragen/Leeg
+    reservoir/Wassen en drogen) — see dyson/robot-probe/README.md,
+    "OPGELOST" sections, for how these commands were reverse-engineered.
+    """
+
+    def test_dock_stop_init(self, mock_coordinator):
+        button = DysonDockStopButton(mock_coordinator)
+        assert button._attr_unique_id == "TEST-SERIAL-123_dock_stop"
+        assert button._attr_translation_key == "dock_stop"
+
+    @pytest.mark.asyncio
+    async def test_dock_stop_press(self, mock_coordinator):
+        mock_coordinator.device.robot_abort_dock_action = AsyncMock()
+        button = DysonDockStopButton(mock_coordinator)
+
+        await button.async_press()
+
+        mock_coordinator.device.robot_abort_dock_action.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_dock_stop_press_error_logged(self, mock_coordinator):
+        mock_coordinator.device.robot_abort_dock_action = AsyncMock(
+            side_effect=RuntimeError("boom")
+        )
+        button = DysonDockStopButton(mock_coordinator)
+
+        with patch("custom_components.hass_dyson.button._LOGGER") as mock_logger:
+            await button.async_press()
+            mock_logger.error.assert_called_once()
+
+    def test_dock_delay_init(self, mock_coordinator):
+        button = DysonDockDelayButton(mock_coordinator)
+        assert button._attr_unique_id == "TEST-SERIAL-123_dock_delay_15m"
+        assert button._attr_translation_key == "dock_delay_15m"
+
+    @pytest.mark.asyncio
+    async def test_dock_delay_press(self, mock_coordinator):
+        mock_coordinator.device.robot_abort_dock_action = AsyncMock()
+        button = DysonDockDelayButton(mock_coordinator)
+
+        await button.async_press()
+
+        mock_coordinator.device.robot_abort_dock_action.assert_called_once_with(
+            delay_minutes=15
+        )
+
+    def test_dock_empty_bin_init(self, mock_coordinator):
+        button = DysonDockEmptyBinButton(mock_coordinator)
+        assert button._attr_unique_id == "TEST-SERIAL-123_dock_empty_bin"
+        assert button._attr_translation_key == "dock_empty_bin"
+
+    @pytest.mark.asyncio
+    async def test_dock_empty_bin_press(self, mock_coordinator):
+        mock_coordinator.device.robot_start_dock_action = AsyncMock()
+        button = DysonDockEmptyBinButton(mock_coordinator)
+
+        await button.async_press()
+
+        mock_coordinator.device.robot_start_dock_action.assert_called_once_with(
+            action="COLLECT_DUST"
+        )
+
+    def test_dock_wash_dry_init(self, mock_coordinator):
+        button = DysonDockWashDryButton(mock_coordinator)
+        assert button._attr_unique_id == "TEST-SERIAL-123_dock_wash_dry"
+        assert button._attr_translation_key == "dock_wash_dry"
+
+    @pytest.mark.asyncio
+    async def test_dock_wash_dry_press(self, mock_coordinator):
+        mock_coordinator.device.robot_start_dock_action = AsyncMock()
+        button = DysonDockWashDryButton(mock_coordinator)
+
+        await button.async_press()
+
+        mock_coordinator.device.robot_start_dock_action.assert_called_once_with(
+            action="WASH_MOP"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dock_wash_dry_press_error_logged(self, mock_coordinator):
+        mock_coordinator.device.robot_start_dock_action = AsyncMock(
+            side_effect=RuntimeError("boom")
+        )
+        button = DysonDockWashDryButton(mock_coordinator)
+
+        with patch("custom_components.hass_dyson.button._LOGGER") as mock_logger:
+            await button.async_press()
+            mock_logger.error.assert_called_once()
+
+
 class TestButtonPlatformIntegration:
     """Test button platform integration scenarios."""
 
@@ -402,14 +497,18 @@ class TestButtonPlatformRobotSetup:
         ):
             await async_setup_entry(mock_hass, mock_config_entry, add_entities)
 
-        # Base call: reconnect + refresh + start-selected-zones; second call:
-        # the discovered zones
+        # Base call: reconnect + refresh + start-selected-zones + 4 dock
+        # action buttons; second call: the discovered zones
         assert add_entities.call_count == 2
         base = add_entities.call_args_list[0][0][0]
-        assert len(base) == 3
+        assert len(base) == 7
         assert isinstance(base[0], DysonReconnectButton)
         assert isinstance(base[1], DysonRefreshZonesButton)
         assert isinstance(base[2], DysonStartSelectedZonesButton)
+        assert isinstance(base[3], DysonDockStopButton)
+        assert isinstance(base[4], DysonDockDelayButton)
+        assert isinstance(base[5], DysonDockEmptyBinButton)
+        assert isinstance(base[6], DysonDockWashDryButton)
         zones = add_entities.call_args_list[1][0][0]
         assert len(zones) == 2
         assert all(isinstance(entity, DysonZoneCleanButton) for entity in zones)
@@ -432,11 +531,11 @@ class TestButtonPlatformRobotSetup:
         ):
             await async_setup_entry(mock_hass, mock_config_entry, add_entities)
 
-        # Reconnect + refresh + start-selected-zones are still created — no
-        # zone buttons yet
+        # Reconnect + refresh + start-selected-zones + 4 dock action
+        # buttons are still created — no zone buttons yet
         add_entities.assert_called_once()
         entities = add_entities.call_args[0][0]
-        assert len(entities) == 3
+        assert len(entities) == 7
         assert isinstance(entities[0], DysonReconnectButton)
         assert isinstance(entities[1], DysonRefreshZonesButton)
         assert isinstance(entities[2], DysonStartSelectedZonesButton)
@@ -465,7 +564,7 @@ class TestButtonPlatformRobotSetup:
         # Recovery buttons only; a successful-but-empty fetch schedules no retry
         add_entities.assert_called_once()
         entities = add_entities.call_args[0][0]
-        assert len(entities) == 3
+        assert len(entities) == 7
         assert isinstance(entities[0], DysonReconnectButton)
         assert isinstance(entities[1], DysonRefreshZonesButton)
         assert isinstance(entities[2], DysonStartSelectedZonesButton)

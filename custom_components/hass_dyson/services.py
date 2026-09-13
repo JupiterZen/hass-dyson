@@ -77,6 +77,7 @@ from .const import (
     CONF_DISCOVERY_METHOD,
     DISCOVERY_CLOUD,
     DOMAIN,
+    SERVICE_ABORT_DOCK_ACTION,
     SERVICE_CANCEL_SLEEP_TIMER,
     SERVICE_GET_CLOUD_DEVICES,
     SERVICE_REFRESH_ACCOUNT_DATA,
@@ -84,6 +85,7 @@ from .const import (
     SERVICE_SET_OSCILLATION_ANGLES,
     SERVICE_SET_SLEEP_TIMER,
     SERVICE_SET_ZONE_BEHAVIOUR,
+    SERVICE_START_DOCK_ACTION,
     SERVICE_START_ZONE_CLEAN,
     SLEEP_TIMER_MAX,
     SLEEP_TIMER_MIN,
@@ -122,6 +124,8 @@ DEVICE_CATEGORY_SERVICES = {
         SERVICE_RESET_FILTER,  # Different filter types for cleaning devices
         SERVICE_START_ZONE_CLEAN,  # Vis Nav zone cleaning via cleaningProgramme
         SERVICE_SET_ZONE_BEHAVIOUR,  # Vis Nav per-zone power/strategy overrides
+        SERVICE_ABORT_DOCK_ACTION,  # Dock "Stop"/"Vertragen" (stop or delay wash/dry)
+        SERVICE_START_DOCK_ACTION,  # Dock "Leeg reservoir"/"Wassen en drogen"
     ],
     "vacuum": [  # Vacuum devices
         SERVICE_RESET_FILTER,
@@ -210,6 +214,29 @@ SERVICE_SET_ZONE_BEHAVIOUR_SCHEMA = vol.Schema(
         vol.Required("zone"): vol.All(str, vol.Length(min=1)),
         vol.Required("cleaning_strategy"): vol.In(_ZONE_CLEANING_STRATEGIES),
         vol.Optional("map"): vol.All(str, vol.Length(min=1)),
+    }
+)
+
+# Dock maintenance action schemas. Reverse-engineered live (13 sep 2026,
+# MITM capture of the MyDyson app's own MQTT traffic — see
+# dyson/robot-probe/README.md, "OPGELOST" sections). Only DRY_MOP has been
+# confirmed with ABORT-DOCK-ACTION and only COLLECT_DUST/WASH_MOP with
+# START-DOCK-ACTION — the action field is not cross-validated between the
+# two message types on a real robot.
+SERVICE_ABORT_DOCK_ACTION_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): str,
+        vol.Optional("delay_minutes"): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=120)
+        ),
+    }
+)
+SERVICE_START_DOCK_ACTION_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): str,
+        vol.Optional("action", default="COLLECT_DUST"): vol.In(
+            ("COLLECT_DUST", "WASH_MOP")
+        ),
     }
 )
 
@@ -890,6 +917,66 @@ async def _handle_start_zone_clean(hass: HomeAssistant, call: ServiceCall) -> No
             "Failed to start zone clean on %s: %s", coordinator.serial_number, err
         )
         raise HomeAssistantError(f"Failed to start zone clean: {err}") from err
+
+
+async def _handle_abort_dock_action(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Handle hass_dyson.abort_dock_action — dock "Stop"/"Vertragen".
+
+    Mirrors robot_abort_dock_action(): with no delay_minutes, stops the
+    current dock wash/dry cycle immediately (the app's "Stop" button);
+    with delay_minutes, delays it instead (the app's "Vertragen" button).
+    Only 15 minutes has been confirmed live against a real robot — see
+    dyson/robot-probe/README.md, "Volledige specificatie van
+    ABORT-DOCK-ACTION".
+    """
+    device_id = call.data["device_id"]
+    delay_minutes: int | None = call.data.get("delay_minutes")
+
+    coordinator = await _get_coordinator_from_device_id(hass, device_id)
+    if not coordinator or not coordinator.device:
+        raise ServiceValidationError(f"Device {device_id} not found or not available")
+
+    try:
+        await coordinator.device.robot_abort_dock_action(delay_minutes=delay_minutes)
+        _LOGGER.info(
+            "Sent abort-dock-action on %s (delay_minutes=%s)",
+            coordinator.serial_number,
+            delay_minutes,
+        )
+    except Exception as err:
+        _LOGGER.error(
+            "Failed to abort dock action on %s: %s", coordinator.serial_number, err
+        )
+        raise HomeAssistantError(f"Failed to abort dock action: {err}") from err
+
+
+async def _handle_start_dock_action(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Handle hass_dyson.start_dock_action — dock "Leeg reservoir"/"Wassen en drogen".
+
+    Mirrors robot_start_dock_action(): action "COLLECT_DUST" is the
+    app's "Leeg reservoir" button, "WASH_MOP" is "Wassen en drogen". Both
+    confirmed live against a real robot — see
+    dyson/robot-probe/README.md, "OPGELOST" sections.
+    """
+    device_id = call.data["device_id"]
+    action: str = call.data["action"]
+
+    coordinator = await _get_coordinator_from_device_id(hass, device_id)
+    if not coordinator or not coordinator.device:
+        raise ServiceValidationError(f"Device {device_id} not found or not available")
+
+    try:
+        await coordinator.device.robot_start_dock_action(action=action)
+        _LOGGER.info(
+            "Sent start-dock-action on %s (action=%s)",
+            coordinator.serial_number,
+            action,
+        )
+    except Exception as err:
+        _LOGGER.error(
+            "Failed to start dock action on %s: %s", coordinator.serial_number, err
+        )
+        raise HomeAssistantError(f"Failed to start dock action: {err}") from err
 
 
 async def _handle_set_zone_behaviour(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -1950,6 +2037,22 @@ async def _register_services(
 
         service_handlers[SERVICE_SET_ZONE_BEHAVIOUR] = async_handle_set_zone_behaviour
         service_schemas[SERVICE_SET_ZONE_BEHAVIOUR] = SERVICE_SET_ZONE_BEHAVIOUR_SCHEMA
+
+    if SERVICE_ABORT_DOCK_ACTION in services_to_register:
+
+        async def async_handle_abort_dock_action(call: ServiceCall) -> None:
+            await _handle_abort_dock_action(hass, call)
+
+        service_handlers[SERVICE_ABORT_DOCK_ACTION] = async_handle_abort_dock_action
+        service_schemas[SERVICE_ABORT_DOCK_ACTION] = SERVICE_ABORT_DOCK_ACTION_SCHEMA
+
+    if SERVICE_START_DOCK_ACTION in services_to_register:
+
+        async def async_handle_start_dock_action(call: ServiceCall) -> None:
+            await _handle_start_dock_action(hass, call)
+
+        service_handlers[SERVICE_START_DOCK_ACTION] = async_handle_start_dock_action
+        service_schemas[SERVICE_START_DOCK_ACTION] = SERVICE_START_DOCK_ACTION_SCHEMA
 
     # Register services that aren't already registered
     registered_services = []

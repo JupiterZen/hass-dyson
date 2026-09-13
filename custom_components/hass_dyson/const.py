@@ -335,6 +335,8 @@ SERVICE_REFRESH_ACCOUNT_DATA: Final = "refresh_account_data"
 SERVICE_GET_CLOUD_DEVICES: Final = "get_cloud_devices"
 SERVICE_START_ZONE_CLEAN: Final = "start_zone_clean"
 SERVICE_SET_ZONE_BEHAVIOUR: Final = "set_zone_behaviour"
+SERVICE_ABORT_DOCK_ACTION: Final = "abort_dock_action"
+SERVICE_START_DOCK_ACTION: Final = "start_dock_action"
 
 # Event types
 EVENT_DEVICE_FAULT: Final = "dyson_device_fault"
