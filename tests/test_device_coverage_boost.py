@@ -742,6 +742,54 @@ class TestRobotVacuumState:
         mock_device_basic._send_robot_command.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_robot_abort_dock_action_stop_now(self, mock_device_basic):
+        """abort_dock_action with no delay sends the 'Stop' variant (no
+        delay field) — VERIFIED live 25/29 aug against a real dock.
+        """
+        mock_device_basic._connected = True
+        mock_device_basic._mqtt_client = MagicMock()
+        mock_device_basic._send_robot_command = AsyncMock()
+
+        await mock_device_basic.robot_abort_dock_action()
+
+        mock_device_basic._send_robot_command.assert_called_once()
+        sent = mock_device_basic._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "ABORT-DOCK-ACTION"
+        assert sent["action"] == "DRY_MOP"
+        assert sent["mode-reason"] == "RAPP"
+        assert "delay" not in sent
+
+    @pytest.mark.asyncio
+    async def test_robot_abort_dock_action_with_delay(self, mock_device_basic):
+        """abort_dock_action with delay_minutes sends the 'Vertragen'
+        variant — VERIFIED live 13 sep 2026 (delay=15, robot resumed
+        DRYING_MOP exactly 15:00 minutes later).
+        """
+        mock_device_basic._connected = True
+        mock_device_basic._mqtt_client = MagicMock()
+        mock_device_basic._send_robot_command = AsyncMock()
+
+        await mock_device_basic.robot_abort_dock_action(delay_minutes=15)
+
+        mock_device_basic._send_robot_command.assert_called_once()
+        sent = mock_device_basic._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "ABORT-DOCK-ACTION"
+        assert sent["action"] == "DRY_MOP"
+        assert sent["delay"] == 15
+
+    @pytest.mark.asyncio
+    async def test_robot_abort_dock_action_not_connected_raises(
+        self, mock_device_basic
+    ):
+        """abort_dock_action raises RuntimeError when the device isn't
+        connected, same guard as the other robot_* commands.
+        """
+        mock_device_basic._connected = False
+
+        with pytest.raises(RuntimeError):
+            await mock_device_basic.robot_abort_dock_action()
+
+    @pytest.mark.asyncio
     async def test_robot_request_state(self, mock_device_basic):
         """Test robot vacuum state request."""
         mock_device_basic._connected = True

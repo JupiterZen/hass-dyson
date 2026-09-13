@@ -4099,6 +4099,60 @@ class DysonDevice:
 
         await self._send_robot_command(command_data)
 
+    async def robot_abort_dock_action(self, delay_minutes: int | None = None) -> None:
+        """Stop or delay the current dock maintenance cycle (wash/dry).
+
+        VERIFIED live (13 sep 2026, MITM capture of the MyDyson app's own
+        MQTT traffic over a WireGuard tunnel — see
+        ``dyson/robot-probe/README.md``, section "OPGELOST"): the app's
+        physical/in-app "Stop" button on the dock sends this command with
+        no ``delay`` field; the "Vertragen" (delay) button sends the same
+        command with ``delay`` set to the chosen number of minutes (15/30/
+        60/120 in the app's picker — only 15 confirmed on the wire so
+        far). Confirmed against a real robot: without a delay, dockState
+        drops to IDLE within ~1s; with ``delay_minutes=15``, dockState
+        dropped to IDLE and returned to DRYING_MOP exactly 15:00 minutes
+        later (to within 0.1s), confirming the robot tracks the delay
+        itself rather than the app resending the command later.
+
+        Only ``action: "DRY_MOP"`` has ever been observed — this is
+        hardcoded rather than exposed as a parameter, since sending an
+        unconfirmed action value (e.g. for WASHING_MOP/COLLECTING_DUST)
+        against a real dock has never been tested and could behave
+        unpredictably.
+
+        Args:
+            delay_minutes: If given, delay the dock action by this many
+                minutes instead of stopping it immediately. Only 15 has
+                been confirmed against a real robot; other values (30/60/
+                120, matching the app's picker) are untested.
+
+        Raises:
+            RuntimeError: If device is not connected
+            Exception: If command transmission fails
+        """
+        if not self.is_connected:
+            raise RuntimeError(f"Device {self.serial_number} is not connected")
+
+        _LOGGER.info(
+            "Sending abort-dock-action command to robot %s (delay=%s)",
+            mask_serial(self.serial_number),
+            delay_minutes,
+        )
+
+        from .const import ROBOT_CMD_ABORT_DOCK_ACTION, ROBOT_DOCK_ACTION_DRY_MOP
+
+        command_data: dict[str, Any] = {
+            "msg": ROBOT_CMD_ABORT_DOCK_ACTION,
+            "action": ROBOT_DOCK_ACTION_DRY_MOP,
+            "time": self._get_command_timestamp(),
+            "mode-reason": "RAPP",
+        }
+        if delay_minutes is not None:
+            command_data["delay"] = delay_minutes
+
+        await self._send_robot_command(command_data)
+
     async def robot_request_state(self) -> None:
         """Request current robot vacuum state.
 
