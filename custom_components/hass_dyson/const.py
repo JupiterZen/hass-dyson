@@ -527,17 +527,24 @@ ROBOT_CMD_PAUSE: Final = "PAUSE"
 ROBOT_CMD_RESUME: Final = "RESUME"
 ROBOT_CMD_ABORT: Final = "ABORT"
 ROBOT_CMD_ABORT_DOCK_ACTION: Final = "ABORT-DOCK-ACTION"
+ROBOT_CMD_START_DOCK_ACTION: Final = "START-DOCK-ACTION"
 
 ROBOT_CMD_REQUEST_STATE: Final = "REQUEST-CURRENT-STATE"
 
 # ABORT-DOCK-ACTION action values (the specific dock phase being
 # stopped/delayed). Only DRY_MOP confirmed live (13 sep 2026, both the
 # app's "Stop" button — no delay field — and "Vertragen"/delay button —
-# delay field present, minutes). WASH_MOP/COLLECT_DUST are guesses based
-# on the other two dock phases (dockState WASHING_MOP/COLLECTING_DUST)
-# but never observed on the wire — do not assume they work without
-# confirming against a real robot first.
+# delay field present, minutes). WASH_MOP is a guess based on the other
+# dock phase (dockState WASHING_MOP) but never observed on the wire — do
+# not assume it works without confirming against a real robot first.
 ROBOT_DOCK_ACTION_DRY_MOP: Final = "DRY_MOP"
+
+# START-DOCK-ACTION action values. COLLECT_DUST confirmed live (13 sep
+# 2026, the app's "Leeg reservoir" button, no delay field, same 4-field
+# shape as ABORT-DOCK-ACTION). WASH_MOP is a guess for the app's "Wassen
+# en drogen" button (never observed on the wire) — do not assume it works
+# without confirming against a real robot first.
+ROBOT_DOCK_ACTION_COLLECT_DUST: Final = "COLLECT_DUST"
 
 # Robot Vacuum MQTT Message Types
 ROBOT_MSG_CURRENT_STATE: Final = "CURRENT-STATE"

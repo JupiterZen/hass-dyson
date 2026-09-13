@@ -790,6 +790,35 @@ class TestRobotVacuumState:
             await mock_device_basic.robot_abort_dock_action()
 
     @pytest.mark.asyncio
+    async def test_robot_start_dock_action(self, mock_device_basic):
+        """start_dock_action sends the 'Leeg reservoir' command —
+        VERIFIED live 13 sep 2026, observed twice with identical shape.
+        """
+        mock_device_basic._connected = True
+        mock_device_basic._mqtt_client = MagicMock()
+        mock_device_basic._send_robot_command = AsyncMock()
+
+        await mock_device_basic.robot_start_dock_action()
+
+        mock_device_basic._send_robot_command.assert_called_once()
+        sent = mock_device_basic._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "START-DOCK-ACTION"
+        assert sent["action"] == "COLLECT_DUST"
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
+    async def test_robot_start_dock_action_not_connected_raises(
+        self, mock_device_basic
+    ):
+        """start_dock_action raises RuntimeError when the device isn't
+        connected, same guard as the other robot_* commands.
+        """
+        mock_device_basic._connected = False
+
+        with pytest.raises(RuntimeError):
+            await mock_device_basic.robot_start_dock_action()
+
+    @pytest.mark.asyncio
     async def test_robot_request_state(self, mock_device_basic):
         """Test robot vacuum state request."""
         mock_device_basic._connected = True

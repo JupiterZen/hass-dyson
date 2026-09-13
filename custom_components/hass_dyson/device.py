@@ -4153,6 +4153,46 @@ class DysonDevice:
 
         await self._send_robot_command(command_data)
 
+    async def robot_start_dock_action(self) -> None:
+        """Start a dock maintenance cycle on demand (e.g. empty the bin).
+
+        VERIFIED live (13 sep 2026, MITM capture of the MyDyson app's own
+        MQTT traffic over a WireGuard tunnel — see
+        ``dyson/robot-probe/README.md``, section "OPGELOST: 'Leeg
+        reservoir' is START-DOCK-ACTION..."): the app's "Leeg reservoir"
+        button sends this command, observed twice with identical shape
+        (no ``delay`` field, same 4 fields as ABORT-DOCK-ACTION).
+
+        Only ``action: "COLLECT_DUST"`` has ever been observed — this is
+        hardcoded rather than exposed as a parameter, since sending an
+        unconfirmed action value (e.g. for WASH_MOP, guessed for the
+        app's "Wassen en drogen" button but never seen on the wire)
+        against a real dock has never been tested and could behave
+        unpredictably.
+
+        Raises:
+            RuntimeError: If device is not connected
+            Exception: If command transmission fails
+        """
+        if not self.is_connected:
+            raise RuntimeError(f"Device {self.serial_number} is not connected")
+
+        _LOGGER.info(
+            "Sending start-dock-action command to robot %s",
+            mask_serial(self.serial_number),
+        )
+
+        from .const import ROBOT_CMD_START_DOCK_ACTION, ROBOT_DOCK_ACTION_COLLECT_DUST
+
+        command_data: dict[str, Any] = {
+            "msg": ROBOT_CMD_START_DOCK_ACTION,
+            "action": ROBOT_DOCK_ACTION_COLLECT_DUST,
+            "time": self._get_command_timestamp(),
+            "mode-reason": "RAPP",
+        }
+
+        await self._send_robot_command(command_data)
+
     async def robot_request_state(self) -> None:
         """Request current robot vacuum state.
 
