@@ -4153,22 +4153,27 @@ class DysonDevice:
 
         await self._send_robot_command(command_data)
 
-    async def robot_start_dock_action(self) -> None:
-        """Start a dock maintenance cycle on demand (e.g. empty the bin).
+    async def robot_start_dock_action(self, action: str = "COLLECT_DUST") -> None:
+        """Start a dock maintenance cycle on demand.
 
         VERIFIED live (13 sep 2026, MITM capture of the MyDyson app's own
         MQTT traffic over a WireGuard tunnel — see
-        ``dyson/robot-probe/README.md``, section "OPGELOST: 'Leeg
-        reservoir' is START-DOCK-ACTION..."): the app's "Leeg reservoir"
-        button sends this command, observed twice with identical shape
-        (no ``delay`` field, same 4 fields as ABORT-DOCK-ACTION).
+        ``dyson/robot-probe/README.md``, sections "OPGELOST: 'Leeg
+        reservoir'..." and "OPGELOST: 'Wassen en drogen'..."): both
+        confirmed action values send this command with no ``delay``
+        field, same 4-field shape as ABORT-DOCK-ACTION:
 
-        Only ``action: "COLLECT_DUST"`` has ever been observed — this is
-        hardcoded rather than exposed as a parameter, since sending an
-        unconfirmed action value (e.g. for WASH_MOP, guessed for the
-        app's "Wassen en drogen" button but never seen on the wire)
-        against a real dock has never been tested and could behave
-        unpredictably.
+        - ``"COLLECT_DUST"`` — the app's "Leeg reservoir" button,
+          observed twice with identical shape.
+        - ``"WASH_MOP"`` — the app's "Wassen en drogen" button, observed
+          1 second before dockState flipped to WASHING_MOP, and again on
+          a deliberate second press.
+
+        Args:
+            action: Which dock phase to start. Only ``"COLLECT_DUST"``
+                and ``"WASH_MOP"`` have been confirmed against a real
+                robot — any other value is sent as-is but untested and
+                could behave unpredictably.
 
         Raises:
             RuntimeError: If device is not connected
@@ -4178,15 +4183,16 @@ class DysonDevice:
             raise RuntimeError(f"Device {self.serial_number} is not connected")
 
         _LOGGER.info(
-            "Sending start-dock-action command to robot %s",
+            "Sending start-dock-action command to robot %s (action=%s)",
             mask_serial(self.serial_number),
+            action,
         )
 
-        from .const import ROBOT_CMD_START_DOCK_ACTION, ROBOT_DOCK_ACTION_COLLECT_DUST
+        from .const import ROBOT_CMD_START_DOCK_ACTION
 
         command_data: dict[str, Any] = {
             "msg": ROBOT_CMD_START_DOCK_ACTION,
-            "action": ROBOT_DOCK_ACTION_COLLECT_DUST,
+            "action": action,
             "time": self._get_command_timestamp(),
             "mode-reason": "RAPP",
         }

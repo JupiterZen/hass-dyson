@@ -807,6 +807,25 @@ class TestRobotVacuumState:
         assert sent["mode-reason"] == "RAPP"
 
     @pytest.mark.asyncio
+    async def test_robot_start_dock_action_wash_mop(self, mock_device_basic):
+        """start_dock_action(action='WASH_MOP') sends the 'Wassen en
+        drogen' command — VERIFIED live 13 sep 2026, seen 1s before
+        dockState flipped to WASHING_MOP, and again on a deliberate
+        second press.
+        """
+        mock_device_basic._connected = True
+        mock_device_basic._mqtt_client = MagicMock()
+        mock_device_basic._send_robot_command = AsyncMock()
+
+        await mock_device_basic.robot_start_dock_action(action="WASH_MOP")
+
+        mock_device_basic._send_robot_command.assert_called_once()
+        sent = mock_device_basic._send_robot_command.call_args[0][0]
+        assert sent["msg"] == "START-DOCK-ACTION"
+        assert sent["action"] == "WASH_MOP"
+        assert sent["mode-reason"] == "RAPP"
+
+    @pytest.mark.asyncio
     async def test_robot_start_dock_action_not_connected_raises(
         self, mock_device_basic
     ):
