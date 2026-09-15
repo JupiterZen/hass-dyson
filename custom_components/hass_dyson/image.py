@@ -32,8 +32,9 @@ v2 devices (e.g. RB05 Spot+Scrub):
     2. Map Visualizer API: GET /v1/mapvisualizer/devices/{serial}/map/{pmapId}
        (returns 404 for RB05).
     3. Zone boundary lines from GET /v2/{serial}/clean-maps-data/{cleanId}
-       Rendered client-side by _render_v2_floor_plan_png (white background +
-       dark zone boundary line segments + green dock icon).
+       Rendered client-side by _render_v2_floor_plan_png (dark background,
+       see _CANVAS_BG_RGBA + bright zone boundary line segments + green
+       dock icon).
 
 Bitmap rendering ported from thoukydides/matterbridge-dyson-robot
 (src/dyson-bitmap-octet.ts + src/dyson-device-360-map.ts).
@@ -493,28 +494,31 @@ def _palette_from_floor_plan(presentation_png: bytes):
       Black  (zone interior)
       White  (zone boundary / walls)
       Gray   (outside any zone)
-    Re-paint to a soft, high-contrast palette so it reads clearly under the
-    transparent dust overlay.
+    Re-paint to a dark, high-contrast palette (see _CANVAS_BG_RGBA) so it
+    reads clearly under the transparent dust overlay and matches every other
+    renderer in this module — 15 sep 2026: previously repainted to a light
+    palette, which looked broken inside a dark HA dashboard the same way the
+    other renderers did (v1 Vis Nav devices only, RB05 never hits this path).
     """
     from PIL import Image
 
     img = Image.open(io.BytesIO(presentation_png)).convert("RGBA")
     pixels = img.load()
     w, h = img.size
-    # Repaint: zones → light cream, boundaries → dark blue-grey, outside → near-white
+    # Repaint: zones → dark charcoal, boundaries → light blue-grey, outside → near-black
     for y in range(h):
         for x in range(w):
             rgba_pixel: tuple[int, int, int, int] = pixels[x, y]  # type: ignore[assignment]
             r, g, b, _ = rgba_pixel
             if r > 200 and g > 200 and b > 200:
                 # white = boundary
-                pixels[x, y] = (60, 60, 90, 255)
+                pixels[x, y] = (195, 195, 220, 255)
             elif r < 50 and g < 50 and b < 50:
                 # black = zone interior
-                pixels[x, y] = (250, 248, 240, 255)
+                pixels[x, y] = (45, 44, 40, 255)
             else:
                 # gray = outside
-                pixels[x, y] = (235, 235, 235, 255)
+                pixels[x, y] = (20, 20, 20, 255)
     return img
 
 
@@ -775,8 +779,8 @@ def _render_v2_floor_plan_png(
 
     Uses the same response as ``_render_v2_map_png`` (``GET /v2/{serial}/clean-maps-data/
     {cleanId}``) but draws only the zone boundary line segments and dock location on a
-    white canvas — no dust heatmap.  This gives a usable floor plan for v2 devices
-    (e.g. RB05 Spot+Scrub) where ``GET /v2/app/{serial}/persistent-maps/{id}``
+    dark canvas (see ``_CANVAS_BG_RGBA``) — no dust heatmap.  This gives a usable floor
+    plan for v2 devices (e.g. RB05 Spot+Scrub) where ``GET /v2/app/{serial}/persistent-maps/{id}``
     returns structured JSON instead of a pre-rendered PNG.
 
     JSON fields used:
@@ -829,8 +833,8 @@ def _render_v2_floor_plan_png(
             _LOGGER.debug("v2 floor plan: invalid dimensions %dx%d", width, height)
             return None
 
-        # White background
-        img = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+        # Dark background — see _CANVAS_BG_RGBA docstring note.
+        img = Image.new("RGBA", (width, height), _CANVAS_BG_RGBA)
         draw = ImageDraw.Draw(img)
 
         def _world_to_px(wx: float, wy: float) -> tuple[int, int]:
@@ -841,7 +845,7 @@ def _render_v2_floor_plan_png(
             return (max(0, min(width - 1, px)), max(0, min(height - 1, py)))
 
         # Draw zone boundary lines
-        # Line.type: 0 = outer wall (thick dark), other = room separator (thin gray)
+        # Line.type: 0 = outer wall (thick, bright), other = room separator (thin grey)
         zones = data.get("zones") or []
         has_lines = False
         for zone in zones:
@@ -859,11 +863,11 @@ def _render_v2_floor_plan_png(
                     float(end.get("x") or 0), float(end.get("y") or 0)
                 )
                 line_type = seg.get("type", 0)
-                # Type 0 → outer wall (thicker, darker); others → room separator
+                # Type 0 → outer wall (thicker, bright); others → room separator
                 if line_type == 0:
-                    draw.line([sx, sy, ex, ey], fill=(40, 40, 40, 255), width=2)
+                    draw.line([sx, sy, ex, ey], fill=(225, 225, 225, 255), width=2)
                 else:
-                    draw.line([sx, sy, ex, ey], fill=(130, 130, 130, 255), width=1)
+                    draw.line([sx, sy, ex, ey], fill=(110, 110, 110, 255), width=1)
                 has_lines = True
 
         # Driven route for this clean — translucent blue line, drawn after
@@ -941,6 +945,22 @@ def _render_v2_floor_plan_png(
     return buf.getvalue()
 
 
+# Dark canvas palette, 15 sep 2026 — the MyDyson app always renders its own
+# maps on a dark background (confirmed: this holds up well regardless of
+# what theme HA itself is in), and HA's ImageEntity serves one shared PNG to
+# every viewer with no per-request theme context (no way to know which
+# viewer's browser is in light/dark mode when the bytes are generated) — so
+# rather than a fixed white canvas that looks broken inside a dark HA
+# dashboard (see the floor-plan dialog screenshot from that day), every
+# renderer below always draws dark, matching the app's own convention
+# instead of trying to track HA's frontend theme.
+_CANVAS_BG_RGBA: tuple[int, int, int, int] = (
+    28,
+    28,
+    30,
+    255,
+)  # near-black, not pure black
+
 # Per-zone fill colour keyed by the live ``cleanStatus`` value from
 # GET /v1/app/{serial}/live-maps/cleaning. Confirmed values (3 sep 2026
 # live probe, see dyson/notes/06-...md): CLEAN_NOT_REQUESTED (not
@@ -950,23 +970,34 @@ def _render_v2_floor_plan_png(
 # obstruction on the path). Unknown/future values fall back to
 # _ZONE_STATUS_FALLBACK_RGBA rather than being skipped, so a new status
 # Dyson might introduce still renders visibly instead of vanishing.
+# 15 sep 2026: darkened from the original pastel-on-white set (see
+# _CANVAS_BG_RGBA) — same hues, roughly halved lightness so they still read
+# as "which status" at a glance against the dark canvas instead of glowing.
 _ZONE_STATUS_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
-    "CLEAN_NOT_REQUESTED": (235, 235, 235, 255),  # light grey — not part of this run
-    "CLEAN_PENDING": (255, 244, 200, 255),  # pale amber — queued
-    "CLEAN_IN_PROGRESS": (190, 225, 255, 255),  # light blue — robot is here now
-    "CLEAN_COMPLETE": (200, 240, 205, 255),  # light green — done
-    "CANT_CLEAN": (255, 205, 205, 255),  # light red — unreachable
+    "CLEAN_NOT_REQUESTED": (60, 60, 62, 255),  # dark grey — not part of this run
+    "CLEAN_PENDING": (95, 80, 35, 255),  # muted amber — queued
+    "CLEAN_IN_PROGRESS": (35, 70, 110, 255),  # muted blue — robot is here now
+    "CLEAN_COMPLETE": (35, 90, 55, 255),  # muted green — done
+    "CANT_CLEAN": (110, 40, 40, 255),  # muted red — unreachable
 }
-_ZONE_STATUS_FALLBACK_RGBA: tuple[int, int, int, int] = (235, 235, 235, 255)
+_ZONE_STATUS_FALLBACK_RGBA: tuple[int, int, int, int] = (60, 60, 62, 255)
 
 # Per-spot fill colour keyed by the ``dirt[].type`` value from the same
 # endpoint. Confirmed value (6 sep 2026 live probe, mid-clean): "solid".
 # Unknown/future values fall back to _DIRT_TYPE_FALLBACK_RGBA rather than
 # being skipped, same reasoning as _ZONE_STATUS_FALLBACK_RGBA above.
+# 15 sep 2026: lightened from the original dark-ochre-on-white set — that
+# colour nearly vanished against the new dark canvas, so it's now a bright
+# ochre/gold instead, still distinct from every zone/furniture hue.
 _DIRT_TYPE_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
-    "solid": (120, 90, 40, 255),  # dark ochre — distinct from every zone/furniture hue
+    "solid": (
+        210,
+        165,
+        80,
+        255,
+    ),  # bright ochre — distinct from every zone/furniture hue
 }
-_DIRT_TYPE_FALLBACK_RGBA: tuple[int, int, int, int] = (120, 90, 40, 255)
+_DIRT_TYPE_FALLBACK_RGBA: tuple[int, int, int, int] = (210, 165, 80, 255)
 
 
 def _render_live_map_png(
@@ -1084,7 +1115,8 @@ def _render_live_map_png(
         width = max(1, int((max_x - min_x + 2 * margin_m) / resolution))
         height = max(1, int((max_y - min_y + 2 * margin_m) / resolution))
 
-        img = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+        # Dark background — see _CANVAS_BG_RGBA docstring note.
+        img = Image.new("RGBA", (width, height), _CANVAS_BG_RGBA)
         draw = ImageDraw.Draw(img, "RGBA")
 
         def _world_to_px(wx: float, wy: float) -> tuple[int, int]:
@@ -1124,7 +1156,7 @@ def _render_live_map_png(
                     continue
                 vx, vy = _world_to_px(float(pt["x"]), float(pt["y"]))
                 draw.rectangle(
-                    [vx - 1, vy - 1, vx + 1, vy + 1], fill=(255, 255, 255, 90)
+                    [vx - 1, vy - 1, vx + 1, vy + 1], fill=(255, 255, 255, 55)
                 )
 
         # Zone outlines (same wall/room-separator distinction as the v2 renderer).
@@ -1144,9 +1176,9 @@ def _render_live_map_png(
                 )
                 line_type = seg.get("type", 0)
                 if line_type == 0:
-                    draw.line([sx, sy, ex, ey], fill=(40, 40, 40, 255), width=2)
+                    draw.line([sx, sy, ex, ey], fill=(225, 225, 225, 255), width=2)
                 else:
-                    draw.line([sx, sy, ex, ey], fill=(130, 130, 130, 255), width=1)
+                    draw.line([sx, sy, ex, ey], fill=(110, 110, 110, 255), width=1)
 
         # Driven route for this clean — translucent blue line. Present in
         # both the live-cleaning response (partial, grows as the clean

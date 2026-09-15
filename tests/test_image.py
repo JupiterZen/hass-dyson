@@ -429,7 +429,12 @@ class TestPaletteFromFloorPlan:
     """Test the _palette_from_floor_plan recolouring helper."""
 
     def test_recolours_white_black_gray_pixels(self):
-        """White → dark, black → cream, gray → near-white."""
+        """White → light blue-grey, black → dark charcoal, gray → near-black.
+
+        15 sep 2026: dark canvas palette (see _CANVAS_BG_RGBA) — the
+        expected values here were flipped from the original light-on-white
+        set when the renderer switched to always-dark output.
+        """
         img = Image.new("RGBA", (3, 1))
         px = img.load()
         px[0, 0] = (255, 255, 255, 255)  # white (boundary)
@@ -441,9 +446,9 @@ class TestPaletteFromFloorPlan:
         result = _palette_from_floor_plan(buf.getvalue())
 
         rpx = result.load()
-        assert rpx[0, 0] == (60, 60, 90, 255)  # white → dark blue-grey
-        assert rpx[1, 0] == (250, 248, 240, 255)  # black → cream
-        assert rpx[2, 0] == (235, 235, 235, 255)  # gray → near-white
+        assert rpx[0, 0] == (195, 195, 220, 255)  # white → light blue-grey
+        assert rpx[1, 0] == (45, 44, 40, 255)  # black → dark charcoal
+        assert rpx[2, 0] == (20, 20, 20, 255)  # gray → near-black
 
     def test_returns_rgba_image(self):
         """Returned image is RGBA mode."""
