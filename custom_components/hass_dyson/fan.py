@@ -309,9 +309,17 @@ class DysonFan(DysonEntity, FanEntity):
 
         # Update speed percentage based on fan speed setting (fnsp)
         if fan_speed_setting == "AUTO":
-            # In auto mode, use the actual fan speed (nmdv) for display
-            actual_speed = self.coordinator.device.fan_speed
-            self._attr_percentage = min(100, max(0, actual_speed * 10))
+            # In auto mode, use the actual fan speed (nmdv) for display, but
+            # only while the motor is actually running (fnst == "FAN"). Auto
+            # mode can idle the motor entirely (fnst == "OFF", e.g. air
+            # quality already good) while leaving nmdv at its last non-zero
+            # value, which previously made HomeKit show a stale speed for an
+            # idle motor.
+            if fan_state == "FAN":
+                actual_speed = self.coordinator.device.fan_speed
+                self._attr_percentage = min(100, max(0, actual_speed * 10))
+            else:
+                self._attr_percentage = 0
         else:
             try:
                 # Convert fnsp (0001-0010) to percentage (10-100%)
@@ -557,9 +565,21 @@ class DysonFan(DysonEntity, FanEntity):
             # Turn off fan when percentage is 0
             await self.async_turn_off()
         else:
+            # set_fan_speed() only changes the target speed (fnsp), it does
+            # not power the device on - so a percentage request while the
+            # fan is off (e.g. via Siri "set to X%") previously appeared to
+            # do nothing until a separate "turn on" command followed. Turn
+            # the fan on first when needed for a single, responsive command.
+            if not self.coordinator.device.fan_power:
+                await self.coordinator.device.set_fan_power(True)
+
             # Convert percentage to Dyson speed (1-10) with proper rounding
             speed = max(1, min(10, round(percentage / 10)))
             await self.coordinator.device.set_fan_speed(speed)
+
+            # Update state immediately for responsive UI
+            self._attr_is_on = True
+            self.async_write_ha_state()
 
             # Let the coordinator update naturally from MQTT messages for final state
 

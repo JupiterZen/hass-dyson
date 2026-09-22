@@ -352,6 +352,30 @@ class TestDysonFan:
         assert fan._attr_percentage == 70  # 7 * 10
         assert fan._attr_preset_mode == "auto"
 
+    def test_handle_coordinator_update_auto_mode_motor_idle(self, mock_coordinator):
+        """Test auto mode shows 0% while the motor is idle (fnst=OFF).
+
+        Auto mode can leave the motor stopped (e.g. air quality already
+        good) while nmdv still holds its last non-zero value - HomeKit
+        should not display that stale speed as if the fan were running.
+        """
+        # Arrange
+        fan = DysonFan(mock_coordinator)
+        mock_coordinator.device.fan_power = True
+        mock_coordinator.device.fan_state = "OFF"  # Motor idle
+        mock_coordinator.device.fan_speed_setting = "AUTO"
+        mock_coordinator.device.fan_speed = 7  # Stale nmdv from before idling
+        mock_coordinator.device.get_state_value.return_value = "ON"  # Auto mode
+
+        # Act
+        with patch.object(fan, "async_write_ha_state"):
+            fan._handle_coordinator_update()
+
+        # Assert
+        assert fan._attr_is_on is True  # Device is still "on" (auto-monitoring)
+        assert fan._attr_percentage == 0  # But motor is idle, not at 70%
+        assert fan._attr_preset_mode == "auto"
+
     def test_handle_coordinator_update_invalid_speed(self, mock_coordinator):
         """Test _handle_coordinator_update with invalid speed setting."""
         # Arrange
@@ -489,12 +513,31 @@ class TestDysonFan:
         fan = DysonFan(mock_coordinator)
 
         # Act
-        await fan.async_set_percentage(60)
+        with patch.object(fan, "async_write_ha_state"):
+            await fan.async_set_percentage(60)
 
         # Assert
         mock_coordinator.device.set_fan_speed.assert_called_once_with(
             6
         )  # 60 -> speed 6
+        mock_coordinator.device.set_fan_power.assert_not_called()  # already on
+        assert fan._attr_is_on is True
+
+    @pytest.mark.asyncio
+    async def test_async_set_percentage_turns_on_when_off(self, mock_coordinator):
+        """Test async_set_percentage powers the fan on first when it is off."""
+        # Arrange
+        fan = DysonFan(mock_coordinator)
+        mock_coordinator.device.fan_power = False
+
+        # Act
+        with patch.object(fan, "async_write_ha_state"):
+            await fan.async_set_percentage(60)
+
+        # Assert
+        mock_coordinator.device.set_fan_power.assert_called_once_with(True)
+        mock_coordinator.device.set_fan_speed.assert_called_once_with(6)
+        assert fan._attr_is_on is True
 
     @pytest.mark.asyncio
     async def test_async_set_percentage_zero(self, mock_coordinator):
