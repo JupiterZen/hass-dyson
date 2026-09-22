@@ -249,7 +249,19 @@ class DysonFan(DysonEntity, FanEntity):
             ]
             self._attr_hvac_mode = HVACMode.OFF
         else:
-            self._attr_preset_modes = [self.PRESET_MODE_AUTO, self.PRESET_MODE_MANUAL]
+            # "manual" bewust niet aangeboden als preset_mode (16 sep 2026):
+            # HA's HomeKit `should_add_preset_mode_switch()` maakt voor elke
+            # niet-"auto"-preset een losse Switch-service aan, en de Woning-app
+            # koos die switch consistent als main-tile-icoon voor de gegroepeerde
+            # tegel (i.p.v. het AirPurifier-icoon) -- vermoede (niet volledig
+            # bevestigde) bijdrager aan de Siri "kan dat niet doen/vinden"-
+            # problematiek, zie ~/dev/smarthome/dyson/notes/10-....md.
+            # Geen functieverlies: async_set_percentage() stuurt altijd een
+            # letterlijke fnsp-snelheidswaarde (nooit "AUTO"), dus elke
+            # percentage-wijziging schakelt het apparaat al impliciet naar
+            # manual -- geverifieerd in de HA-log (RotationSpeed-write ->
+            # preset_mode=manual, zonder dat preset_mode expliciet gezet werd).
+            self._attr_preset_modes = [self.PRESET_MODE_AUTO]
 
         # Initialize state attributes to ensure clean state
         self._attr_is_on = None  # Will be set properly in first coordinator update
