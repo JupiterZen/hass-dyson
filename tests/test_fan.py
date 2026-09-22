@@ -183,7 +183,7 @@ class TestDysonFan:
         )
         assert fan._attr_speed_count == 10
         assert fan._attr_percentage_step == 10
-        assert fan._attr_preset_modes == ["auto", "manual"]
+        assert fan._attr_preset_modes == ["auto"]
         assert fan._attr_is_on is None
         assert fan._attr_percentage == 0
         assert fan._attr_current_direction == "forward"
