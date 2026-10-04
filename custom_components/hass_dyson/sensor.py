@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -4982,6 +4983,12 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
         # 10-minute-cached cloud history as fallback) is secondary/restore-only.
         self._tracked_task_begin_time: object = None
         self._last_reset_date: object = None
+        # 3 okt 2026: on 2 okt the live endpoint went away (404 once docked)
+        # before the poll that saw the last zone finish, leaving the tally on
+        # 5 of 6. These drive a final history lookup after cleaning stops.
+        self._cleaning_anchor_epoch: float | None = None
+        self._finalize_pending = False
+        self._finalize_attempts = 0
         self._attr_unique_id = f"{coordinator.serial_number}_kamers_al_klaar_deze_ronde"
         self._attr_name = "Kamers Al Klaar Deze Ronde"
         self._attr_icon = "mdi:progress-check"
@@ -5039,6 +5046,8 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
         today = self._today_str()
 
         if not _is_cleaning(self.coordinator):
+            if self._finalize_pending:
+                await self._async_finalize_from_history()
             # Not mid-clean: a new calendar day (Europe/Amsterdam via HA's
             # configured timezone, not bare UTC — matters here because the
             # departure automation this feeds runs on local-day boundaries)
@@ -5049,8 +5058,15 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
                 self._completed_zone_names = set()
                 self._tracked_clean_id = None
                 self._last_reset_date = today
+                self._cleaning_anchor_epoch = None
+                self._finalize_pending = False
                 self._publish_state()
             return
+
+        if self._cleaning_anchor_epoch is None:
+            self._cleaning_anchor_epoch = time.time()
+        self._finalize_pending = True
+        self._finalize_attempts = 0
 
         clean_id = _current_clean_id(self.coordinator)
         if clean_id is not None and clean_id != self._tracked_clean_id:
@@ -5069,6 +5085,7 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
         )
         if started_new_clean:
             self._completed_zone_names = set()
+            self._cleaning_anchor_epoch = time.time()
         if task_begin is not None:
             self._tracked_task_begin_time = task_begin
 
@@ -5076,24 +5093,7 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
         if not isinstance(zones, list):
             return
 
-        newly_complete: set[str] = set()
-        all_resolved = True
-        for zone in zones:
-            if not isinstance(zone, dict):
-                continue
-            name = zone.get("name")
-            status = zone.get("cleanStatus")
-            if not isinstance(name, str):
-                continue
-            if status == "CLEAN_COMPLETE":
-                newly_complete.add(name)
-            elif status not in ("CLEAN_COMPLETE", "CANT_CLEAN"):
-                # CLEAN_NOT_REQUESTED/_PENDING/_IN_PROGRESS — run not fully
-                # resolved yet, so this poll can't be "the finish line" for
-                # the reset-after-complete-run check below.
-                all_resolved = False
-
-        self._completed_zone_names |= newly_complete
+        all_resolved = self._absorb_zones(zones)
 
         # A clean that resolved every selected zone (all CLEAN_COMPLETE or
         # CANT_CLEAN, none still pending/in-progress) counts as a proper,
@@ -5105,5 +5105,75 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
         if all_resolved and zones and self._reset_after_complete_run_enabled():
             self._completed_zone_names = set()
             self._last_reset_date = today
+            self._cleaning_anchor_epoch = None
 
         self._publish_state()
+
+    def _absorb_zones(self, zones: list) -> bool:
+        """Add CLEAN_COMPLETE zone names to the tally; True if none is unresolved."""
+        all_resolved = True
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            name = zone.get("name")
+            status = zone.get("cleanStatus")
+            if not isinstance(name, str):
+                continue
+            if status == "CLEAN_COMPLETE":
+                self._completed_zone_names.add(name)
+            elif status != "CANT_CLEAN":
+                # CLEAN_NOT_REQUESTED/_PENDING/_IN_PROGRESS — run not fully
+                # resolved yet, so this can't be "the finish line" for the
+                # reset-after-complete-run check.
+                all_resolved = False
+        return all_resolved
+
+    async def _async_finalize_from_history(self) -> None:
+        """After cleaning stops, merge the finished clean's zones from the cloud.
+
+        The live-map endpoint 404s once the robot is docked, so a zone that
+        completed between the last successful poll and docking would never be
+        counted. clean-maps-data for the clean just run carries the same
+        per-zone ``cleanStatus``. The record is only trusted if it ended after
+        this session's cleaning began, so a lagging history can't add the
+        previous clean's zones.
+        """
+        from .image import _fetch_v2_floor_plan_data, _floor_plan_cache
+
+        self._finalize_attempts += 1
+        serial = self.coordinator.serial_number
+        _clean_maps_cache.expire(serial)
+        cleans = await fetch_clean_maps(self.coordinator)
+        rec = cleans[0] if cleans else None
+        stamps = [
+            t
+            for t in (
+                getattr(rec, "end_time_epoch", None),
+                getattr(rec, "start_time_epoch", None),
+            )
+            if isinstance(t, (int, float))
+        ]
+        clean_id = getattr(rec, "clean_id", None)
+        anchor = self._cleaning_anchor_epoch
+        fresh = (
+            bool(stamps)
+            and isinstance(clean_id, str)
+            and anchor is not None
+            and max(stamps) >= anchor - 60
+        )
+        data = None
+        if fresh:
+            _floor_plan_cache.expire(f"{serial}:fp:{clean_id}")
+            data = await _fetch_v2_floor_plan_data(self.coordinator, clean_id)
+        zones = data.get("zones") if isinstance(data, dict) else None
+
+        if isinstance(zones, list):
+            all_resolved = self._absorb_zones(zones)
+            if all_resolved and zones and self._reset_after_complete_run_enabled():
+                self._completed_zone_names = set()
+                self._last_reset_date = self._today_str()
+                self._cleaning_anchor_epoch = None
+            self._finalize_pending = False
+            self._publish_state()
+        elif self._finalize_attempts >= 6:
+            self._finalize_pending = False

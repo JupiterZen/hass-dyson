@@ -446,3 +446,122 @@ class TestDayBoundaryReset:
             await sensor.async_update()
 
         assert sensor._completed_zone_names == {"Living Room"}
+
+
+class TestFinalizeFromHistoryAfterDock:
+    """Live endpoint 404s once docked; zones finishing in that gap come from history."""
+
+    @staticmethod
+    def _record(clean_id="c-now", end=None, start=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            clean_id=clean_id, end_time_epoch=end, start_time_epoch=start
+        )
+
+    @staticmethod
+    def _patches(records, zones=None):
+        return (
+            patch(
+                "custom_components.hass_dyson.sensor.fetch_clean_maps",
+                AsyncMock(return_value=records),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
+                AsyncMock(return_value={"zones": zones} if zones is not None else None),
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_last_zone_added_after_dock(self, mock_robot_coordinator):
+        import time
+
+        sensor = _sensor_with_hass(mock_robot_coordinator, reset_toggle_state="off")
+        sensor._last_reset_date = sensor._today_str()
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(
+                zones=[
+                    _zone("Gang", "CLEAN_COMPLETE"),
+                    _zone("Slaapkamer", "CLEAN_IN_PROGRESS"),
+                ]
+            )
+        )
+        await sensor.async_update()
+        assert sensor._attr_native_value == 1
+
+        mock_robot_coordinator.device.robot_state = "FULL_CLEAN_FINISHED"
+        p1, p2 = self._patches(
+            [self._record(end=time.time() + 5)],
+            [_zone("Gang", "CLEAN_COMPLETE"), _zone("Slaapkamer", "CLEAN_COMPLETE")],
+        )
+        with p1, p2:
+            await sensor.async_update()
+
+        assert sorted(sensor._attr_extra_state_attributes["zone_names"]) == [
+            "Gang",
+            "Slaapkamer",
+        ]
+        assert sensor._finalize_pending is False
+
+    @pytest.mark.asyncio
+    async def test_stale_previous_clean_is_ignored(self, mock_robot_coordinator):
+        import time
+
+        sensor = _sensor_with_hass(mock_robot_coordinator, reset_toggle_state="off")
+        sensor._last_reset_date = sensor._today_str()
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(zones=[_zone("Gang", "CLEAN_IN_PROGRESS")])
+        )
+        await sensor.async_update()
+
+        mock_robot_coordinator.device.robot_state = "FULL_CLEAN_FINISHED"
+        p1, p2 = self._patches(
+            [self._record(clean_id="c-old", end=time.time() - 3600)],
+            [_zone("Keuken", "CLEAN_COMPLETE")],
+        )
+        with p1, p2 as fp:
+            await sensor.async_update()
+
+        fp.assert_not_awaited()
+        assert sensor._attr_native_value == 0
+        assert sensor._finalize_pending is True
+
+    @pytest.mark.asyncio
+    async def test_fully_resolved_history_resets_when_toggle_on(
+        self, mock_robot_coordinator
+    ):
+        import time
+
+        sensor = _sensor_with_hass(mock_robot_coordinator, reset_toggle_state="on")
+        sensor._last_reset_date = sensor._today_str()
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(zones=[_zone("Gang", "CLEAN_IN_PROGRESS")])
+        )
+        await sensor.async_update()
+
+        mock_robot_coordinator.device.robot_state = "FULL_CLEAN_FINISHED"
+        p1, p2 = self._patches(
+            [self._record(end=time.time() + 5)], [_zone("Gang", "CLEAN_COMPLETE")]
+        )
+        with p1, p2:
+            await sensor.async_update()
+
+        assert sensor._attr_native_value == 0
+        assert sensor._cleaning_anchor_epoch is None
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_six_attempts(self, mock_robot_coordinator):
+        sensor = _sensor_with_hass(mock_robot_coordinator, reset_toggle_state="off")
+        sensor._last_reset_date = sensor._today_str()
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(zones=[_zone("Gang", "CLEAN_IN_PROGRESS")])
+        )
+        await sensor.async_update()
+
+        mock_robot_coordinator.device.robot_state = "FULL_CLEAN_FINISHED"
+        p1, p2 = self._patches([])
+        with p1, p2:
+            for _ in range(6):
+                await sensor.async_update()
+
+        assert sensor._finalize_pending is False
