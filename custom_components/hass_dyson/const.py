@@ -642,7 +642,13 @@ ROBOT_STATE_TO_HA_STATE: Final = {
     # "Dock and Charging States".
     ROBOT_STATE_INACTIVE_CHARGED: VacuumActivity.DOCKED,
     ROBOT_STATE_INACTIVE_CHARGING: VacuumActivity.DOCKED,
-    ROBOT_STATE_INACTIVE_DISCHARGING: VacuumActivity.DOCKED,
+    # 4 okt 2026: INACTIVE_DISCHARGING is NOT "on the dock": on 3 okt the robot
+    # paused mid-clean 4.5 m from the dock, reported this state with the
+    # battery flat at ~20% for 6 hours (no charging), and HA showed "docked",
+    # which also let the departure automation's `docked` condition pass.
+    # Single observation, so IDLE (claims nothing about the dock) rather than
+    # a stronger state.
+    ROBOT_STATE_INACTIVE_DISCHARGING: VacuumActivity.IDLE,
     ROBOT_STATE_FULL_CLEAN_CHARGING: VacuumActivity.DOCKED,
     ROBOT_STATE_MAPPING_CHARGING: VacuumActivity.DOCKED,
     # Returning states — en route to the dock, not on it yet
