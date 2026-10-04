@@ -4271,6 +4271,84 @@ class DysonDevice:
             )
             raise
 
+    async def _send_robot_jdm_command(
+        self, method: str, params: dict[str, Any]
+    ) -> None:
+        """Send a command over the robot's separate "jdm" MQTT protocol.
+
+        Discovered live (30 sep 2026, full MQTT payload logging against
+        the replacement robot — see dyson/robot-probe/onderzoek/
+        2026-09-30-jdm-protocol-ontdekt-en-spraak-alarm.md) on
+        ``{mqtt_prefix}/{serial}/command/jdm`` / ``status/jdm`` — a
+        JSON-RPC-like layer entirely separate from the regular
+        ``STATE-SET``/``CURRENT-STATE`` protocol used by
+        :meth:`_send_robot_command`. Confirmed in use by the app for at
+        least ``service.get_map_list``, ``service.get_preference``, and
+        ``prop.get``/``prop.set``/``prop.post``.
+
+        This was NOT seen on the original robot (7VS-EU-UNA6126A) across
+        four earlier capture sessions (see the reply posted to
+        thoukydides/matterbridge-dyson-robot#46) — presumably enabled by
+        a firmware/app version difference on the replacement unit, not
+        confirmed.
+
+        Fire-and-forget, matching :meth:`_send_robot_command` — no
+        request/response correlation via ``msgId`` is implemented; the
+        robot's resulting state (if any) arrives separately via
+        ``status/jdm`` ``prop.post`` broadcasts, handled in
+        ``coordinator.py``.
+
+        Args:
+            method: jdm RPC method name, e.g. ``"prop.set"``.
+            params: Method parameters, e.g. ``{"alarm": 1}``.
+
+        Raises:
+            RuntimeError: If device is not connected or MQTT client unavailable.
+            Exception: If command transmission fails.
+        """
+        if not self.is_connected or not self._mqtt_client:
+            raise RuntimeError(f"Device {self.serial_number} MQTT not available")
+
+        topic = f"{self.mqtt_prefix}/{self.serial_number}/command/jdm"
+        # msgId in captured traffic was an arbitrary numeric string (e.g.
+        # '4100163000') — no server-assigned ID is required since this is
+        # fire-and-forget; a random uint32 avoids adding a new import for
+        # what random.randint would otherwise need.
+        command_data = {
+            "msgId": str(uuid.uuid4().int % (2**32 - 1) + 1),
+            "version": "1.0.1",
+            "method": method,
+            "params": params,
+            "time": self._get_command_timestamp(),
+        }
+        message = json.dumps(command_data)
+
+        _LOGGER.debug(
+            "Sending robot jdm command to %s on topic %s: %s",
+            self._log_serial,
+            topic,
+            command_data,
+        )
+
+        try:
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+
+            def _publish_command():
+                result = self._mqtt_client.publish(topic, message)
+                result.wait_for_publish(timeout=5.0)
+
+            await loop.run_in_executor(None, _publish_command)
+
+            _LOGGER.debug("Robot jdm command sent successfully to %s", self._log_serial)
+
+        except Exception as ex:
+            _LOGGER.error(
+                "Failed to send robot jdm command to %s: %s", self._log_serial, ex
+            )
+            raise
+
     async def set_robot_child_lock(self, enabled: bool) -> None:
         """Set the robot's child lock on/off.
 
@@ -4460,6 +4538,14 @@ class DysonDevice:
         ``{"mode-reason":"RAPP","time":"...","alarm":true,"msg":
         "STATE-SET"}``, robot's next CURRENT-STATE reflected the change
         immediately.
+
+        NOT the same setting as :meth:`set_robot_voice_notifications`,
+        despite both using the field name ``alarm`` — confirmed on the
+        wire 30 sep 2026 to be two entirely separate mechanisms (this one
+        via the regular ``STATE-SET``/``CURRENT-STATE`` protocol, the
+        other via the separate "jdm" protocol) — see that method's
+        docstring and dyson/robot-probe/onderzoek/
+        2026-09-30-jdm-protocol-ontdekt-en-spraak-alarm.md.
         """
         await self._send_robot_command(
             {
@@ -4469,6 +4555,28 @@ class DysonDevice:
                 "mode-reason": "RAPP",
             }
         )
+
+    async def set_robot_voice_notifications(self, enabled: bool) -> None:
+        """Set whether the robot gives spoken voice notifications.
+
+        VERIFIED 30 sep 2026 (full MQTT payload logging against a live
+        toggle of this exact setting in the MyDyson app): app sent
+        ``command/jdm: {"method": "prop.set", "params": {"alarm": 1|0}}``
+        — a JSON-RPC-like write on the separate "jdm" protocol (see
+        :meth:`_send_robot_jdm_command`), confirmed distinct from
+        :meth:`set_robot_alarm` (the "find my robot" chime, which uses
+        the regular ``STATE-SET`` protocol and did not change when this
+        setting was toggled, and vice versa).
+
+        Unlike most robot settings, there is no known way to read the
+        current value back: ``service.get_preference`` (the jdm read
+        used for per-zone settings) does not include an ``alarm``/voice
+        field, and no ``CURRENT-STATE``/``STATE-CHANGE`` field carries
+        it either — the entity built on this method starts with unknown
+        state until the first write (via HA or the app) is observed via
+        a ``status/jdm`` ``prop.post`` broadcast.
+        """
+        await self._send_robot_jdm_command("prop.set", {"alarm": 1 if enabled else 0})
 
     async def set_robot_volume(self, volume: int) -> None:
         """Set the robot's voice/alert volume level.

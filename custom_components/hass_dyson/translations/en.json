@@ -335,6 +335,9 @@
       "robot_alarm": {
         "name": "Find My Robot Alarm"
       },
+      "robot_voice_notifications": {
+        "name": "Voice Notifications"
+      },
       "robot_detergent": {
         "name": "Detergent"
       },

@@ -116,6 +116,14 @@ async def async_setup_entry(
         if "collectDustOnSelfClean" in coordinator.data:
             entities.append(DysonRobotCollectDustOnSelfCleanSwitch(coordinator))
 
+        # Voice notifications toggle (separate "jdm" protocol, see
+        # DysonRobotVoiceNotificationsSwitch) — unlike the switches above,
+        # NOT gated on a coordinator.data key already being present: the
+        # jdm protocol only broadcasts a value after the first write (via
+        # HA or the app), so gating on "already seen" would mean the
+        # entity could never appear until it had already been used once.
+        entities.append(DysonRobotVoiceNotificationsSwitch(coordinator))
+
         # Per-zone "include in next multi-room clean" toggles — local
         # selection state only, no MQTT/cloud write. Discovered from the
         # same persistent-map metadata as the zone clean buttons in
@@ -1241,6 +1249,79 @@ class DysonRobotAlarmSwitch(_DysonRobotBooleanSwitch):
     _GETTER = "robot_alarm"
     _SETTER = "set_robot_alarm"
     _LABEL = "alarm"
+
+
+class DysonRobotVoiceNotificationsSwitch(DysonEntity, SwitchEntity):
+    """Switch for whether the robot gives spoken voice notifications.
+
+    Does NOT use the ``_DysonRobotBooleanSwitch`` base (unlike
+    DysonRobotAlarmSwitch above) because its state does not live on
+    ``coordinator.device`` via the regular CURRENT-STATE-derived
+    properties — it comes from the separate "jdm" MQTT protocol, tracked
+    directly on ``coordinator.data["jdm-properties"]`` by
+    ``coordinator._handle_jdm_status_message``. See
+    :meth:`DysonDevice.set_robot_voice_notifications` for the full
+    protocol details and how this is confirmed distinct from
+    DysonRobotAlarmSwitch (the "find my robot" chime — same field name
+    ``alarm``, two entirely separate mechanisms).
+
+    State starts unknown (``None``) until the first write is observed —
+    there is no known "read current value" jdm call for this property
+    (see the write method's docstring).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        """Initialize the voice-notifications switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_voice_notifications"
+        self._attr_translation_key = "robot_voice_notifications"
+        self._attr_icon = "mdi:account-voice"
+        self._attr_is_on = self._read_state()
+
+    def _read_state(self) -> bool | None:
+        jdm_properties = (self.coordinator.data or {}).get("jdm-properties", {})
+        value = jdm_properties.get("alarm")
+        return value if isinstance(value, bool) else None
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._attr_is_on = self._read_state()
+        super()._handle_coordinator_update()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable spoken voice notifications."""
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable spoken voice notifications."""
+        await self._set(False)
+
+    async def _set(self, enabled: bool) -> None:
+        if not self.coordinator.device:
+            return
+        try:
+            await self.coordinator.device.set_robot_voice_notifications(enabled)
+            _LOGGER.debug(
+                "%s voice notifications for %s",
+                "Enabled" if enabled else "Disabled",
+                mask_serial(self.coordinator.serial_number),
+            )
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error(
+                "Communication error setting voice notifications to %s for %s: %s",
+                enabled,
+                self.coordinator.serial_number,
+                err,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error setting voice notifications to %s for %s: %s",
+                enabled,
+                self.coordinator.serial_number,
+                err,
+            )
 
 
 class DysonRobotDetergentSwitch(_DysonRobotBooleanSwitch):

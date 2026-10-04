@@ -667,6 +667,16 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._handle_firmware_update_status(topic, data)
             return
 
+        # Handle the separate "jdm" protocol (RB05 robots only, discovered
+        # 30 sep 2026 — see dyson/robot-probe/onderzoek/2026-09-30-jdm-
+        # protocol-ontdekt-en-spraak-alarm.md). These messages carry
+        # "method"/"params" instead of "msg", so they would never match
+        # the STATE-CHANGE/CURRENT-STATE handling below — handled here
+        # instead, before that dispatch.
+        if topic.endswith("/status/jdm"):
+            self._handle_jdm_status_message(data)
+            return
+
         # Update entity states for STATE-CHANGE, CURRENT-STATE, ENVIRONMENTAL-CURRENT-SENSOR-DATA, and CURRENT-FAULTS messages
         message_type = data.get("msg", "")
         if message_type == "STATE-CHANGE":
@@ -726,6 +736,44 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         except Exception as e:
             _LOGGER.warning("Error handling environmental message: %s", e)
+
+    def _handle_jdm_status_message(self, data: dict[str, Any]) -> None:
+        """Handle a message on the separate "jdm" protocol's status topic.
+
+        Only ``prop.set``/``prop.post`` messages carrying an ``alarm``
+        key (the voice-notifications toggle, see
+        ``device.set_robot_voice_notifications``) are handled — every
+        other jdm method (``service.get_map_list``,
+        ``service.get_preference``, etc.) is ignored here; those are
+        read on demand elsewhere, not tracked as live coordinator state.
+
+        Two shapes seen on the wire for a voice-notifications change,
+        both handled the same way (extract "alarm" from wherever it is):
+        - ``{"method": "prop.post", "params": {"alarm": 1}}`` — the
+          robot's own broadcast of the new value.
+        - ``{"code": 0, "method": "prop.set", "data": {"property":
+          [{"prop": "alarm", "code": 0}]}}`` — the write acknowledgment;
+          note this does NOT carry the new value (just a per-property
+          success code), so it is not used to update state here.
+        """
+        try:
+            method = data.get("method")
+            if method != "prop.post":
+                return
+            params = data.get("params")
+            if not isinstance(params, dict) or "alarm" not in params:
+                return
+
+            if not self.data:
+                self.data = {}
+            jdm_properties = self.data.setdefault("jdm-properties", {})
+            jdm_properties["alarm"] = bool(params["alarm"])
+
+            self.hass.loop.call_soon_threadsafe(
+                lambda: self.async_set_updated_data(self.data)
+            )
+        except Exception as e:  # noqa: BLE001 — never let a parse error kill the MQTT loop
+            _LOGGER.warning("Error handling jdm status message: %s", e)
 
     def _handle_firmware_update_status(self, topic: str, data: dict[str, Any]) -> None:
         """Handle firmware update status messages from /status/software topic.
