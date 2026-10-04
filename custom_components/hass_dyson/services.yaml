@@ -155,9 +155,10 @@ start_zone_clean:
 set_zone_behaviour:
   name: Set Zone Behaviour (Vis Nav)
   description: >-
-    Override the cleaning strategy for a specific zone on a Dyson 360 Vis Nav.
-    Persists to Dyson cloud so the override applies to every subsequent clean —
-    same as changing the zone's cleaning behaviour in the MyDyson app.
+    Override one or more per-clean settings for a specific zone on a Dyson
+    360 Vis Nav. Persists to Dyson cloud so the override applies to every
+    subsequent clean — same as changing the zone's settings in the MyDyson
+    app. At least one setting field must be given.
   fields:
     device_id:
       name: Device
@@ -177,7 +178,7 @@ set_zone_behaviour:
       description: >-
         Per-zone cleaning strategy. Maps to the same four behaviours as the
         global Vis Nav power-level select.
-      required: true
+      required: false
       selector:
         select:
           options:
@@ -185,6 +186,49 @@ set_zone_behaviour:
             - quick
             - quiet
             - boost
+    clean_type:
+      name: Clean Type
+      description: Whether to vacuum only, or vacuum and mop this zone.
+      required: false
+      selector:
+        select:
+          options:
+            - vacuum
+            - vacuumAndMop
+    water_level:
+      name: Water Level
+      description: Mop water level for this zone (only relevant with vacuumAndMop).
+      required: false
+      selector:
+        select:
+          options:
+            - low
+            - medium
+            - high
+    mop_passes:
+      name: Mop Passes
+      description: Number of mop passes for this zone. Only 1 and 2 confirmed by Dyson's app.
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 2
+          mode: box
+    dry_passes:
+      name: Dry Passes
+      description: Number of dry passes for this zone. Only 1 and 2 confirmed by Dyson's app.
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 2
+          mode: box
+    uv_scan:
+      name: UV Scan
+      description: Whether to enable the UV dirt-detection scan for this zone.
+      required: false
+      selector:
+        boolean:
     map:
       name: Map
       description: >-

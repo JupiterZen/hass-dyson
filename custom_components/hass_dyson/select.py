@@ -8,12 +8,16 @@ from typing import Any
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from .const import (
     DEVICE_CATEGORY_ROBOT,
     DOMAIN,
+    ROBOT_MSG_MAP_MANIFEST_UPDATED,
     ROBOT_POWER_OPTIONS_360_EYE,
     ROBOT_POWER_OPTIONS_HEURIST,
     ROBOT_POWER_OPTIONS_VIS_NAV,
@@ -24,6 +28,24 @@ from .device_utils import mask_serial
 from .entity import DysonEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+# Same debounce window as switch.py's zone-target-switch manifest refresh —
+# these two entity families are discovered from the same broadcast and
+# should not race each other on separate timers.
+_ZONE_SELECT_MANIFEST_REFRESH_DEBOUNCE: float = 5.0
+
+# clean_type × water_level, collapsed into one human-friendly axis — this
+# is also how the MyDyson app presents it (one picker, not two). Only "low"/
+# "medium"/"high" water levels and "vacuum"/"vacuumAndMop" clean types have
+# been observed on the wire (2026-09-30 captures); no other combinations
+# confirmed.
+_ZONE_CLEAN_TYPE_OPTIONS: dict[str, tuple[str, str | None]] = {
+    "Alleen stofzuigen": ("vacuum", None),
+    "Stofzuigen + dweilen (laag water)": ("vacuumAndMop", "low"),
+    "Stofzuigen + dweilen (gemiddeld water)": ("vacuumAndMop", "medium"),
+    "Stofzuigen + dweilen (hoog water)": ("vacuumAndMop", "high"),
+}
+_ZONE_CLEANING_STRATEGY_OPTIONS = ("auto", "quick", "quiet", "boost")
 
 
 async def async_setup_entry(
@@ -89,10 +111,13 @@ async def async_setup_entry(
         if coordinator.data and "voiceLanguage" in coordinator.data:
             entities.append(DysonRobotVoiceLanguageSelect(coordinator))
 
+    is_robot = isinstance(device_categories, list) and any(
+        cat == DEVICE_CATEGORY_ROBOT for cat in device_categories
+    )
+
     # Add tilt oscillation select for ec devices that report the oton key in state.
     # These devices (e.g. BP04) have no dedicated capability flag; presence of oton
     # in the first STATE-CHANGE product-state is the sole gating criterion.
-    device_categories = getattr(coordinator, "device_category", [])
     if isinstance(device_categories, list) and "ec" in device_categories:
         product_state = {}
         if coordinator.data:
@@ -104,6 +129,291 @@ async def async_setup_entry(
     # No separate heating mode select needed
 
     async_add_entities(entities, True)
+
+    # Per-zone cleaning-mode/strategy selects — separate discovery call, same
+    # cloud-metadata-driven lifecycle as switch.py's zone target switches
+    # (discovered from the robot's current map, refreshed on the same
+    # PERSISTENT-MAP-MANIFEST-UPDATED broadcast). Uses async_add_entities
+    # directly (not the ``entities`` list above) since discovery is async
+    # and must run after the initial batch is already registered.
+    if is_robot:
+        await _async_setup_zone_settings_selects(
+            hass, config_entry, coordinator, async_add_entities
+        )
+
+
+def _ha_device_id_for_serial(hass: HomeAssistant, serial_number: str) -> str:
+    """Resolve this integration's HA device_id, for a hass_dyson service call.
+
+    Shared by both zone-settings select entities below.
+    """
+    registry = dr.async_get(hass)
+    entry = registry.async_get_device(identifiers={(DOMAIN, serial_number)})
+    if entry is None:
+        raise HomeAssistantError(f"No HA device registry entry for {serial_number}")
+    return entry.id
+
+
+async def _async_setup_zone_settings_selects(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    coordinator: DysonDataUpdateCoordinator,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Discover/refresh per-zone cleaning-mode/strategy selects.
+
+    Mirrors switch.py's ``_async_setup_zone_target_switches`` lifecycle
+    (same manifest broadcast, same debounce, same "current map only" scope
+    — a select for a zone on a map the robot isn't on would let a user
+    change a setting they can't currently see reflected anywhere), but
+    reads from the richer v2 persistent-map-metadata
+    (``_fetch_zone_settings_for_current_map``) rather than the v1
+    id/name-only shape, since ``settings`` only exists there.
+    """
+    from .services import _fetch_zone_settings_for_current_map
+
+    known_selects: dict[
+        str, tuple[DysonRobotZoneCleanTypeSelect, DysonRobotZoneCleaningStrategySelect]
+    ] = {}
+
+    async def _async_discover() -> None:
+        result = await _fetch_zone_settings_for_current_map(coordinator)
+        if result is None:
+            return
+        map_id, zones = result
+
+        new_entities: list[SelectEntity] = []
+        fresh_ids: set[str] = set()
+        for zone in zones:
+            zone_id = zone.get("id")
+            if not zone_id:
+                continue
+            fresh_ids.add(zone_id)
+            existing = known_selects.get(zone_id)
+            if existing is not None:
+                for entity in existing:
+                    entity.async_update_zone(zone)
+                continue
+            try:
+                clean_type_select = DysonRobotZoneCleanTypeSelect(
+                    coordinator, map_id, zone
+                )
+                strategy_select = DysonRobotZoneCleaningStrategySelect(
+                    coordinator, map_id, zone
+                )
+            except Exception:  # noqa: BLE001 — one bad zone shouldn't block the rest
+                _LOGGER.exception(
+                    "Zone-settings select construction failed for zone %r", zone_id
+                )
+                continue
+            known_selects[zone_id] = (clean_type_select, strategy_select)
+            new_entities.extend([clean_type_select, strategy_select])
+
+        # A zone no longer on the current map — retire its selects. Same
+        # reasoning as the target switches: no command history worth
+        # preserving, a returning zone just gets fresh selects.
+        stale_ids = set(known_selects) - fresh_ids
+        for zone_id in stale_ids:
+            for entity in known_selects.pop(zone_id):
+                if entity.hass is not None:
+                    hass.async_create_task(entity.async_remove())
+
+        if new_entities:
+            async_add_entities(new_entities, True)
+
+    manifest_refresh_unsub: CALLBACK_TYPE | None = None
+    manifest_listener_removed = False
+
+    async def _async_manifest_refresh(_now) -> None:
+        nonlocal manifest_refresh_unsub
+        manifest_refresh_unsub = None
+        from .services import _persistent_map_cache
+
+        _persistent_map_cache.invalidate(coordinator.serial_number)
+        await _async_discover()
+
+    def _schedule_manifest_refresh() -> None:
+        nonlocal manifest_refresh_unsub
+        if manifest_listener_removed:
+            return
+        if manifest_refresh_unsub is not None:
+            manifest_refresh_unsub()
+        manifest_refresh_unsub = async_call_later(
+            hass, _ZONE_SELECT_MANIFEST_REFRESH_DEBOUNCE, _async_manifest_refresh
+        )
+
+    def _on_device_message(topic: str, data: dict[str, Any]) -> None:
+        if data.get("msg") != ROBOT_MSG_MAP_MANIFEST_UPDATED:
+            return
+        hass.loop.call_soon_threadsafe(_schedule_manifest_refresh)
+
+    device = coordinator.device
+    if device is not None:
+        device.add_message_callback(_on_device_message)
+
+        def _remove_manifest_listener() -> None:
+            nonlocal manifest_listener_removed
+            manifest_listener_removed = True
+            device.remove_message_callback(_on_device_message)
+            if manifest_refresh_unsub is not None:
+                manifest_refresh_unsub()
+
+        config_entry.async_on_unload(_remove_manifest_listener)
+
+    await _async_discover()
+
+
+class DysonRobotZoneCleanTypeSelect(DysonEntity, SelectEntity):
+    """Per-zone "reinigingswijze" select (clean_type + water_level combined).
+
+    Cloud-backed setting — reads/writes
+    PUT /v2/app/{serial}/persistent-map-metadata/{mapId} via the
+    hass_dyson.set_zone_behaviour service (see services.py for the endpoint
+    details and the read-modify-write it performs). Deliberately not a
+    RestoreEntity: this is cloud truth, not local UI selection state like
+    switch.py's DysonRobotZoneTargetSwitch, so re-fetching on the next
+    manifest refresh is more correct than restoring a possibly-stale value
+    across a restart.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        coordinator: DysonDataUpdateCoordinator,
+        map_id: str,
+        zone: dict,
+    ) -> None:
+        """Initialize the zone clean-type select."""
+        super().__init__(coordinator)
+        self._zone_id: str = zone["id"]
+        self._map_id = map_id
+        self._attr_unique_id = (
+            f"{coordinator.serial_number}_zone_clean_type_{map_id}_{self._zone_id}"
+        )
+        self._attr_options = list(_ZONE_CLEAN_TYPE_OPTIONS)
+        self._attr_icon = "mdi:spray-bottle"
+        self.async_update_zone(zone)
+
+    @callback
+    def async_update_zone(self, zone: dict) -> None:
+        """Refresh state from freshly-fetched zone settings."""
+        self.zone_name: str = str(zone.get("name") or f"Zone {self._zone_id}")
+        self._attr_name = f"{self.zone_name} reinigingswijze"
+        settings = zone.get("settings") or {}
+        clean_type = settings.get("cleanType")
+        water_level = settings.get("waterLevel")
+        self._attr_current_option = next(
+            (
+                label
+                for label, (ct, wl) in _ZONE_CLEAN_TYPE_OPTIONS.items()
+                if ct == clean_type and (ct == "vacuum" or wl == water_level)
+            ),
+            None,
+        )
+        if self.hass is not None and self.entity_id is not None:
+            self.async_write_ha_state()
+
+    async def async_select_option(self, option: str) -> None:
+        """Apply the chosen cleaning mode via the set_zone_behaviour service."""
+        clean_type, water_level = _ZONE_CLEAN_TYPE_OPTIONS[option]
+        service_data: dict[str, Any] = {
+            "device_id": _ha_device_id_for_serial(
+                self.hass, self.coordinator.serial_number
+            ),
+            "zone": self._zone_id,
+            "map": self._map_id,
+            "clean_type": clean_type,
+        }
+        if water_level is not None:
+            service_data["water_level"] = water_level
+        try:
+            await self.hass.services.async_call(
+                DOMAIN, "set_zone_behaviour", service_data, blocking=True
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to set zone %s (%s) clean type to %r for %s: %s",
+                self._zone_id,
+                self.zone_name,
+                option,
+                mask_serial(self.coordinator.serial_number),
+                err,
+            )
+            return
+        self._attr_current_option = option
+        self.async_write_ha_state()
+
+
+class DysonRobotZoneCleaningStrategySelect(DysonEntity, SelectEntity):
+    """Per-zone cleaning-strategy select (auto/quick/quiet/boost).
+
+    See DysonRobotZoneCleanTypeSelect for the shared cloud-write/refresh
+    rationale — this is the same pattern, one settings field.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        coordinator: DysonDataUpdateCoordinator,
+        map_id: str,
+        zone: dict,
+    ) -> None:
+        """Initialize the zone cleaning-strategy select."""
+        super().__init__(coordinator)
+        self._zone_id: str = zone["id"]
+        self._map_id = map_id
+        self._attr_unique_id = (
+            f"{coordinator.serial_number}_zone_strategy_{map_id}_{self._zone_id}"
+        )
+        self._attr_options = list(_ZONE_CLEANING_STRATEGY_OPTIONS)
+        self._attr_icon = "mdi:tune-vertical"
+        self.async_update_zone(zone)
+
+    @callback
+    def async_update_zone(self, zone: dict) -> None:
+        """Refresh state from freshly-fetched zone settings."""
+        self.zone_name: str = str(zone.get("name") or f"Zone {self._zone_id}")
+        self._attr_name = f"{self.zone_name} reinigingsstrategie"
+        settings = zone.get("settings") or {}
+        strategy = settings.get("cleaningStrategy")
+        self._attr_current_option = (
+            strategy if strategy in _ZONE_CLEANING_STRATEGY_OPTIONS else None
+        )
+        if self.hass is not None and self.entity_id is not None:
+            self.async_write_ha_state()
+
+    async def async_select_option(self, option: str) -> None:
+        """Apply the chosen strategy via the set_zone_behaviour service."""
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                "set_zone_behaviour",
+                {
+                    "device_id": _ha_device_id_for_serial(
+                        self.hass, self.coordinator.serial_number
+                    ),
+                    "zone": self._zone_id,
+                    "map": self._map_id,
+                    "cleaning_strategy": option,
+                },
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to set zone %s (%s) cleaning strategy to %r for %s: %s",
+                self._zone_id,
+                self.zone_name,
+                option,
+                mask_serial(self.coordinator.serial_number),
+                err,
+            )
+            return
+        self._attr_current_option = option
+        self.async_write_ha_state()
 
 
 class DysonOscillationModeSelect(DysonEntity, SelectEntity):

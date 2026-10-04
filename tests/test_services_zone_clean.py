@@ -248,8 +248,51 @@ class TestStartZoneCleanService:
         coordinator.device.robot_start_clean.assert_not_called()
 
 
+def _zone_settings_metadata(maps: list[PersistentMapMeta]) -> list[dict]:
+    """Build the raw v2 persistent-map-metadata shape from test ZoneMeta fixtures.
+
+    Mirrors what GET /v2/app/{serial}/persistent-map-metadata actually
+    returns (id/name/type/isSelected/order/area/settings per zone) — richer
+    than the ZoneMeta dataclass used elsewhere in these tests, which only
+    carries id/name/area.
+    """
+    return [
+        {
+            "id": m.id,
+            "name": m.name,
+            "zones": [
+                {
+                    "id": z.id,
+                    "name": z.name,
+                    "type": "livingRoom",
+                    "isSelected": False,
+                    "order": 0,
+                    "area": z.area,
+                    "settings": {
+                        "cleaningStrategy": "auto",
+                        "cleanType": "vacuum",
+                        "waterLevel": "low",
+                        "mopPasses": 1,
+                        "dryPasses": 1,
+                        "isUvScanOn": True,
+                    },
+                }
+                for z in m.zones
+            ],
+        }
+        for m in maps
+    ]
+
+
 class TestSetZoneBehaviourService:
-    """Test _handle_set_zone_behaviour map selection (cloud-only op)."""
+    """Test _handle_set_zone_behaviour map selection (cloud-only op).
+
+    30 sep 2026: rewritten for the persistent-map-metadata read-modify-write
+    (PUT /v2/app/{serial}/persistent-map-metadata/{mapId} with the full zone
+    array) that replaced the old, never-working
+    client.set_zone_behaviour() call — see services.py's docstrings for the
+    endpoint history.
+    """
 
     async def _run(self, coordinator, maps, data):
         with (
@@ -265,37 +308,93 @@ class TestSetZoneBehaviourService:
             await _handle_set_zone_behaviour(MagicMock(), _call(data))
 
     @staticmethod
-    def _with_cloud_client(coordinator) -> MagicMock:
+    def _with_cloud_client(coordinator, maps: list[PersistentMapMeta]) -> MagicMock:
+        """Wire a cloud client plus GET/PUT persistent-map-metadata mocks.
+
+        Returns the mock client; the fetch/put patches are attached to it as
+        ``fetch_mock``/``put_mock`` attributes so tests can assert on them.
+        """
         client = MagicMock()
-        client.set_zone_behaviour = AsyncMock()
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=client)
         cm.__aexit__ = AsyncMock(return_value=False)
         coordinator.async_cloud_client.return_value = cm
+
+        fetch_mock = AsyncMock(return_value=_zone_settings_metadata(maps))
+        put_mock = AsyncMock()
+        client.fetch_mock = fetch_mock
+        client.put_mock = put_mock
         return client
+
+    def _patches(self, fetch_mock, put_mock):
+        return (
+            patch(
+                "custom_components.hass_dyson.services._fetch_zone_settings_metadata",
+                fetch_mock,
+            ),
+            patch(
+                "custom_components.hass_dyson.services._put_zone_settings_metadata",
+                put_mock,
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_zone_on_non_current_map_is_settable(self):
         """Zone behaviours are cloud state — currency must not block them."""
         coordinator = _make_coordinator()
-        client = self._with_cloud_client(coordinator)
-        await self._run(
-            coordinator,
-            _two_maps(current="map-up"),
-            {"device_id": "dev", "zone": "Kitchen", "cleaning_strategy": "boost"},
-        )
+        maps = _two_maps(current="map-up")
+        client = self._with_cloud_client(coordinator, maps)
+        p1, p2 = self._patches(client.fetch_mock, client.put_mock)
+        with p1, p2:
+            await self._run(
+                coordinator,
+                maps,
+                {"device_id": "dev", "zone": "Kitchen", "cleaning_strategy": "boost"},
+            )
 
-        client.set_zone_behaviour.assert_awaited_once_with(
-            SERIAL, "map-down", "5", "boost"
-        )
+        client.put_mock.assert_awaited_once()
+        call_args = client.put_mock.await_args
+        assert call_args.args[0] is client
+        assert call_args.args[1] == SERIAL
+        assert call_args.args[2] == "map-down"
+        put_zones = call_args.args[3]
+        kitchen = next(z for z in put_zones if z["id"] == "5")
+        assert kitchen["settings"]["cleaningStrategy"] == "boost"
+        # Unrelated zones on the same map must be sent back unmodified —
+        # PUT replaces the whole array, so omitting one would silently
+        # reset it.
+        assert {z["id"] for z in put_zones} == {"1", "2", "5"}
 
     @pytest.mark.asyncio
     async def test_ambiguous_zone_without_currency_raises(self):
         coordinator = _make_coordinator()
-        self._with_cloud_client(coordinator)
-        with pytest.raises(ServiceValidationError, match="more than one map"):
-            await self._run(
-                coordinator,
-                _two_maps(),
-                {"device_id": "dev", "zone": "Hallway", "cleaning_strategy": "auto"},
-            )
+        maps = _two_maps()
+        client = self._with_cloud_client(coordinator, maps)
+        p1, p2 = self._patches(client.fetch_mock, client.put_mock)
+        with p1, p2:
+            with pytest.raises(ServiceValidationError, match="more than one map"):
+                await self._run(
+                    coordinator,
+                    maps,
+                    {
+                        "device_id": "dev",
+                        "zone": "Hallway",
+                        "cleaning_strategy": "auto",
+                    },
+                )
+
+    @pytest.mark.asyncio
+    async def test_no_settings_given_is_rejected(self):
+        """At least one setting field is required — a bare zone+device is a no-op."""
+        coordinator = _make_coordinator()
+        maps = _two_maps(current="map-up")
+        client = self._with_cloud_client(coordinator, maps)
+        p1, p2 = self._patches(client.fetch_mock, client.put_mock)
+        with p1, p2:
+            with pytest.raises(ServiceValidationError, match="at least one setting"):
+                await self._run(
+                    coordinator,
+                    maps,
+                    {"device_id": "dev", "zone": "Kitchen"},
+                )
+        client.put_mock.assert_not_awaited()

@@ -197,22 +197,39 @@ SERVICE_START_ZONE_CLEAN_SCHEMA = vol.Schema(
 )
 
 # Per-zone behaviour override schema.
-# Real endpoint (captured from MyDyson iOS app via mitmproxy):
-#   PUT /v1/app/{serial}/{mapId}/zones/{zoneId}/zone-behaviours
-#   Body: {"cleaningStrategy": "auto" | "quick" | "quiet" | "boost"}
-# (Note: NOT /persistent-maps/{mapId}/.../behaviour as documented by
-# thoukydides/matterbridge-dyson-robot — the path is shorter and the
-# resource is `zone-behaviours` plural.)
 #
-# vacuumPowerMode is present in the persistent-map metadata response but the
-# MyDyson app never writes it — only cleaningStrategy. The named strategies
-# correspond to the same 4 power modes as the global Vis Nav power select.
+# Real endpoint (captured from the MyDyson iOS app's own traffic via
+# mitmproxy, 30 sep 2026 — see dyson/robot-probe/onderzoek/
+# 2026-09-30-start-of-clean-en-zone-instellingen.md):
+#   PUT /v2/app/{serial}/persistent-map-metadata/{mapId}
+#   Body: the FULL zone array for that map (every zone, not just the one
+#   being changed) — each entry {isSelected, id, name, type, order, area,
+#   settings: {cleaningStrategy, cleanType, waterLevel, mopPasses,
+#   dryPasses, isUvScanOn}}. Read-modify-write: fetch the current array via
+#   GET /v2/app/{serial}/persistent-map-metadata first, patch only the
+#   target zone's settings, send the whole array back.
+#
+# Earlier versions of this service targeted
+# `/v1/app/{serial}/{mapId}/zones/{zoneId}/zone-behaviours` (singular zone,
+# `{"cleaningStrategy": ...}` only) — that endpoint consistently returned
+# a 500 against the real cloud and was never confirmed against genuine app
+# traffic. Confirmed wrong 30 sep 2026 once a live app session was
+# captured making an actual settings change.
 _ZONE_CLEANING_STRATEGIES = ("auto", "quick", "quiet", "boost")
+_ZONE_CLEAN_TYPES = ("vacuum", "vacuumAndMop")
+_ZONE_WATER_LEVELS = ("low", "medium", "high")
 SERVICE_SET_ZONE_BEHAVIOUR_SCHEMA = vol.Schema(
     {
         vol.Required("device_id"): str,
         vol.Required("zone"): vol.All(str, vol.Length(min=1)),
-        vol.Required("cleaning_strategy"): vol.In(_ZONE_CLEANING_STRATEGIES),
+        vol.Optional("cleaning_strategy"): vol.In(_ZONE_CLEANING_STRATEGIES),
+        vol.Optional("clean_type"): vol.In(_ZONE_CLEAN_TYPES),
+        vol.Optional("water_level"): vol.In(_ZONE_WATER_LEVELS),
+        # Only 1 and 2 have been observed on the wire (app's mopPasses
+        # picker); range capped there rather than guessed wider.
+        vol.Optional("mop_passes"): vol.All(vol.Coerce(int), vol.Range(min=1, max=2)),
+        vol.Optional("dry_passes"): vol.All(vol.Coerce(int), vol.Range(min=1, max=2)),
+        vol.Optional("uv_scan"): cv.boolean,
         vol.Optional("map"): vol.All(str, vol.Length(min=1)),
     }
 )
@@ -979,28 +996,186 @@ async def _handle_start_dock_action(hass: HomeAssistant, call: ServiceCall) -> N
         raise HomeAssistantError(f"Failed to start dock action: {err}") from err
 
 
+async def _fetch_zone_settings_metadata(client, serial_number: str) -> list[dict]:
+    """GET the full per-zone settings metadata for every map on the account.
+
+    Endpoint (captured from the MyDyson iOS app's own traffic via
+    mitmproxy, 30 sep 2026): ``GET /v2/app/{serial}/persistent-map-metadata``
+    — no map ID in the path, returns a JSON array of maps. Unlike
+    ``libdyson_rest``'s ``get_persistent_map_metadata()`` (which targets the
+    older v1 shape and only exposes ``id``/``name``/``area`` per zone), this
+    raw form carries ``type``, ``isSelected``, ``order`` and the full
+    ``settings`` block (``cleaningStrategy``/``cleanType``/``waterLevel``/
+    ``mopPasses``/``dryPasses``/``isUvScanOn``) — the exact shape the PUT in
+    :func:`_put_zone_settings_metadata` requires for its read-modify-write.
+
+    Returns the raw parsed JSON (list of map dicts); not wrapped in a
+    dataclass since this is a narrow, single-purpose read used only to
+    build the PUT body below.
+
+    Raises:
+        DysonAuthError: If not authenticated, or the token has expired.
+        DysonAPIError: On any other HTTP failure.
+    """
+    import httpx
+    from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
+    from libdyson_rest.utils import get_api_hostname
+
+    http_client = await client._get_client()  # noqa: SLF001 — no public accessor
+    url = f"{get_api_hostname(client.country).rstrip('/')}/v2/app/{serial_number}/persistent-map-metadata"
+    try:
+        response = await http_client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as err:
+        if err.response.status_code == 401:
+            raise DysonAuthError("Authentication token expired or invalid") from err
+        raise DysonAPIError(f"Failed to fetch persistent-map-metadata: {err}") from err
+    except httpx.RequestError as err:
+        raise DysonAPIError(f"Failed to fetch persistent-map-metadata: {err}") from err
+
+    data = response.json()
+    if not isinstance(data, list):
+        raise DysonAPIError(
+            f"Unexpected persistent-map-metadata response shape for {serial_number}"
+        )
+    return data
+
+
+async def _put_zone_settings_metadata(
+    client, serial_number: str, map_id: str, zones: list[dict]
+) -> None:
+    """PUT the full per-zone settings array back to the cloud.
+
+    Endpoint (captured from the MyDyson iOS app's own traffic via
+    mitmproxy, 30 sep 2026 — a live, deliberate zone-settings change in the
+    app, confirmed applied on the next clean): ``PUT /v2/app/{serial}/
+    persistent-map-metadata/{mapId}``, body = the complete zone array for
+    that map (every zone, not just the one being changed) — the server
+    replaces the whole set, so omitting an unrelated zone would silently
+    reset it. Response is an empty ``200 OK``.
+
+    Superseded a prior implementation
+    (``libdyson_rest.AsyncDysonClient.set_zone_behaviour()``, targeting
+    ``PUT /v1/app/{serial}/{mapId}/zones/{zoneId}/zone-behaviours`` with a
+    single-field ``{"cleaningStrategy": ...}`` body) that consistently
+    returned a 500 against the real cloud and was never confirmed against
+    genuine app traffic — see the docstring history in that library method.
+
+    Raises:
+        DysonAuthError: If not authenticated, or the token has expired.
+        DysonAPIError: On any other HTTP failure.
+    """
+    import httpx
+    from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
+    from libdyson_rest.utils import get_api_hostname
+
+    http_client = await client._get_client()  # noqa: SLF001 — no public accessor
+    url = (
+        f"{get_api_hostname(client.country).rstrip('/')}/v2/app/{serial_number}"
+        f"/persistent-map-metadata/{map_id}"
+    )
+    try:
+        response = await http_client.put(url, json=zones)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as err:
+        if err.response.status_code == 401:
+            raise DysonAuthError("Authentication token expired or invalid") from err
+        raise DysonAPIError(f"Failed to update persistent-map-metadata: {err}") from err
+    except httpx.RequestError as err:
+        raise DysonAPIError(f"Failed to update persistent-map-metadata: {err}") from err
+
+
+async def _fetch_zone_settings_for_current_map(
+    coordinator: DysonDataUpdateCoordinator,
+) -> tuple[str, list[dict]] | None:
+    """GET the current map's zones with full per-zone settings.
+
+    Used by the zone-settings select entities (select.py) at setup/refresh
+    time — a read-only counterpart to :func:`_fetch_zone_settings_metadata`
+    that resolves "current map" the same way the rest of this module does
+    (:func:`_effective_current_map`, backed by the v1 ``PersistentMapMeta``
+    list, which is what carries the robot's MQTT-reported map id) and then
+    picks the matching entry out of the richer v2 response.
+
+    Returns ``(map_id, zones)`` or ``None`` when there is no auth token, no
+    maps, or any fetch step fails — treated as transient (mirrors
+    switch.py's ``_async_setup_zone_target_switches``, which likewise
+    swallows discovery failures so the next manifest-refresh/retry can
+    recover): callers should just retry on the next refresh rather than
+    raise.
+    """
+    try:
+        v1_maps = await _fetch_persistent_map_metadata(coordinator)
+    except Exception as err:  # noqa: BLE001 — caller retries on next refresh
+        _LOGGER.debug(
+            "Zone-settings map lookup failed for %s: %s", coordinator.serial_number, err
+        )
+        return None
+    if not v1_maps:
+        return None
+    pmap = _effective_current_map(v1_maps, coordinator) or v1_maps[0]
+
+    async with coordinator.async_cloud_client() as client:
+        if client is None:
+            return None
+        try:
+            v2_maps = await _fetch_zone_settings_metadata(
+                client, coordinator.serial_number
+            )
+        except Exception as err:  # noqa: BLE001 — caller retries on next refresh
+            _LOGGER.debug(
+                "Zone-settings fetch failed for %s: %s", coordinator.serial_number, err
+            )
+            return None
+
+    target = next(
+        (m for m in v2_maps if isinstance(m, dict) and m.get("id") == pmap.id),
+        None,
+    )
+    if target is None:
+        return None
+    zones = [z for z in (target.get("zones") or []) if isinstance(z, dict)]
+    return pmap.id, zones
+
+
 async def _handle_set_zone_behaviour(hass: HomeAssistant, call: ServiceCall) -> None:
-    """PUT a zone's cleaningStrategy override on the cloud.
+    """Update one zone's per-clean settings via a read-modify-write PUT.
 
-    Endpoint (captured from MyDyson iOS app via mitmproxy):
-      PUT /v1/app/{serial}/{mapId}/zones/{zoneId}/zone-behaviours
-      Body: {"cleaningStrategy": "auto" | "quick" | "quiet" | "boost"}
-
-    The path documented in thoukydides/matterbridge-dyson-robot
-    (`persistent-maps/{mapId}/zones/{zoneId}/behaviour`) returns 404 — the
-    real path drops the `persistent-maps/` segment and uses the plural
-    resource `zone-behaviours`.
+    See :func:`_fetch_zone_settings_metadata` and
+    :func:`_put_zone_settings_metadata` for the endpoint details. At least
+    one settings field must be given — this call is a no-op (and rejected)
+    if none are.
     """
     device_id = call.data["device_id"]
     zone_in = str(call.data["zone"]).strip()
-    cleaning_strategy = call.data["cleaning_strategy"]
     requested_map: str | None = call.data.get("map")
+
+    setting_updates = {
+        target_key: call.data[call_key]
+        for call_key, target_key in (
+            ("cleaning_strategy", "cleaningStrategy"),
+            ("clean_type", "cleanType"),
+            ("water_level", "waterLevel"),
+            ("mop_passes", "mopPasses"),
+            ("dry_passes", "dryPasses"),
+        )
+        if call_key in call.data
+    }
+    if "uv_scan" in call.data:
+        setting_updates["isUvScanOn"] = call.data["uv_scan"]
+    if not setting_updates:
+        raise ServiceValidationError(
+            "set_zone_behaviour requires at least one setting to change "
+            "(cleaning_strategy, clean_type, water_level, mop_passes, "
+            "dry_passes, or uv_scan)"
+        )
 
     coordinator = await _get_coordinator_from_device_id(hass, device_id)
     if not coordinator:
         raise ServiceValidationError(f"Device {device_id} not found")
 
-    # Resolve zone name → ID via cached map metadata
+    # Resolve zone name → ID via cached map metadata (v1 shape suffices —
+    # only id/name matching is needed here).
     maps = await _fetch_persistent_map_metadata(coordinator)
     if not maps:
         raise HomeAssistantError(f"No persistent maps for {coordinator.serial_number}")
@@ -1029,8 +1204,43 @@ async def _handle_set_zone_behaviour(hass: HomeAssistant, call: ServiceCall) -> 
                 "re-authenticate to enable cloud features"
             )
         try:
-            await client.set_zone_behaviour(
-                coordinator.serial_number, pmap_id, zone_id, cleaning_strategy
+            full_maps = await _fetch_zone_settings_metadata(
+                client, coordinator.serial_number
+            )
+            target_map = next(
+                (
+                    m
+                    for m in full_maps
+                    if isinstance(m, dict) and m.get("id") == pmap_id
+                ),
+                None,
+            )
+            if target_map is None:
+                raise HomeAssistantError(
+                    f"Map {pmap_id!r} not found in persistent-map-metadata "
+                    f"for {coordinator.serial_number}"
+                )
+            zones = target_map.get("zones") or []
+            target_zone = next(
+                (z for z in zones if isinstance(z, dict) and z.get("id") == zone_id),
+                None,
+            )
+            if target_zone is None:
+                raise HomeAssistantError(
+                    f"Zone {zone_id!r} not found in persistent-map-metadata "
+                    f"for map {pmap_id!r}"
+                )
+            target_zone.setdefault("settings", {}).update(setting_updates)
+            # nameLocation is present on GET but never sent by the real app
+            # on PUT (confirmed on the wire) — drop it rather than guess
+            # whether the server tolerates or rejects it.
+            put_zones = [
+                {k: v for k, v in z.items() if k != "nameLocation"}
+                for z in zones
+                if isinstance(z, dict)
+            ]
+            await _put_zone_settings_metadata(
+                client, coordinator.serial_number, pmap_id, put_zones
             )
         except (DysonAPIError, DysonAuthError) as err:
             raise HomeAssistantError(
@@ -1040,11 +1250,11 @@ async def _handle_set_zone_behaviour(hass: HomeAssistant, call: ServiceCall) -> 
     # Invalidate map cache so the next read picks up the new behaviour.
     _persistent_map_cache.invalidate(coordinator.serial_number)
     _LOGGER.info(
-        "Set zone behaviour on %s zone %s (%s): cleaningStrategy=%s",
+        "Set zone behaviour on %s zone %s (%s): %s",
         coordinator.serial_number,
         zone_id,
         zone_in,
-        cleaning_strategy,
+        setting_updates,
     )
 
 
