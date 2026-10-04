@@ -147,6 +147,11 @@ _floor_plan_cache = TTLCache(6 * 3600)
 # instead of each firing their own.
 _live_map_cache = TTLCache(3)
 _live_map_locks: dict[str, asyncio.Lock] = {}
+_live_mapping_cache = TTLCache(3)
+_live_mapping_locks: dict[str, asyncio.Lock] = {}
+_MAPPING_RUN_STATES = frozenset(
+    {"MAPPING_RUNNING", "MAPPING_INITIATED", "MAPPING_PAUSED"}
+)
 
 
 async def _fetch_map_image(
@@ -412,6 +417,137 @@ async def _fetch_live_map_cleaning_once(client, serial: str) -> dict | None:
             )
             return None
     return None
+
+
+async def _fetch_live_map_mapping(
+    coordinator: DysonDataUpdateCoordinator,
+) -> dict | None:
+    """Fetch ``GET /v1/app/{serial}/live-maps/mapping`` (mapping runs only).
+
+    Same 3 s TTL cache, per-serial lock and single 429 retry as
+    ``_fetch_live_map_cleaning``, for the same reason (several consumers poll
+    in one burst and Dyson's cloud rate-limits it). Confirmed 30 sep 2026: the
+    response carries ``robotLocation``, ``dockLocation``, a growing
+    ``dimensions`` grid and the raw ``mapData`` occupancy array, but no
+    furniture/obstacles/dirt.
+    """
+    from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
+
+    serial = coordinator.serial_number
+    fresh = _live_mapping_cache.get(serial)
+    if fresh is not None:
+        return fresh
+
+    if serial not in _live_mapping_locks:
+        _live_mapping_locks[serial] = asyncio.Lock()
+
+    async with _live_mapping_locks[serial]:
+        fresh = _live_mapping_cache.get(serial)
+        if fresh is not None:
+            return fresh
+
+        async with coordinator.async_cloud_client() as client:
+            if client is None:
+                return None
+            for attempt in range(2):
+                try:
+                    data = await client.get_live_map_mapping(serial)
+                except (DysonAPIError, DysonAuthError) as err:
+                    if attempt == 0 and "429" in str(err):
+                        await asyncio.sleep(1)
+                        continue
+                    _LOGGER.debug(
+                        "Live map (mapping) fetch failed for %s: %s", serial, err
+                    )
+                    return None
+                _live_mapping_cache.set(serial, data)
+                return data
+    return None
+
+
+# mapData values seen in the 29 sep 2026 mapping-run capture (260x340 grid):
+# 0 unknown, 1 floor, 255 wall/boundary. 253 also occurs (about 2% of cells,
+# in blobs) but its meaning is not established, so it is drawn muted.
+_MAPPING_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (20, 20, 20),
+    (45, 70, 95),
+    (230, 230, 235),
+    (150, 110, 60),
+)
+_MAPPING_VALUE_TO_INDEX = {0: 0, 1: 1, 255: 2, 253: 3}
+
+
+def _render_live_mapping_png(data: dict) -> bytes | None:
+    """Render a live mapping-run response (``mapData`` occupancy grid) as PNG.
+
+    The grid is row-major, ``width`` x ``height`` cells of ``resolution``
+    metres, origin (``offsetX``, ``offsetY``) at the bottom-left; the image is
+    flipped so north is up like the cleaning render. The first response of a
+    run has a 200x200 empty grid and placeholder robot/dock coordinates far
+    outside it (1100, 1100); markers outside the grid are skipped.
+    """
+    from PIL import Image, ImageDraw
+
+    try:
+        dims = data["dimensions"]
+        width = int(float(dims["width"]))
+        height = int(float(dims["height"]))
+        res = float(dims["resolution"])
+        off_x = float(dims.get("offsetX") or 0)
+        off_y = float(dims.get("offsetY") or 0)
+        grid = data["mapData"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        width <= 0
+        or height <= 0
+        or res <= 0
+        or not isinstance(grid, list)
+        or len(grid) != width * height
+    ):
+        return None
+
+    lut = _MAPPING_VALUE_TO_INDEX
+    img = Image.frombytes("P", (width, height), bytes(lut.get(v, 0) for v in grid))
+    flat_palette = [c for rgb in _MAPPING_PALETTE for c in rgb]
+    img.putpalette(flat_palette + [0] * (768 - len(flat_palette)))
+    img = img.convert("RGBA").transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+
+    factor = max(1, 800 // max(width, height))
+    if factor > 1:
+        img = img.resize((width * factor, height * factor), Image.Resampling.NEAREST)
+    draw = ImageDraw.Draw(img)
+
+    def to_px(x: float, y: float) -> tuple[float, float] | None:
+        col = (x - off_x) / res
+        row = height - (y - off_y) / res
+        if not (0 <= col < width and 0 <= row < height):
+            return None
+        return col * factor, row * factor
+
+    dock = data.get("dockLocation")
+    if isinstance(dock, dict):
+        pos = to_px(float(dock.get("x") or 0), float(dock.get("y") or 0))
+        if pos:
+            draw.ellipse(
+                [pos[0] - 5, pos[1] - 5, pos[0] + 5, pos[1] + 5],
+                fill=(0, 200, 80, 255),
+                outline=(0, 120, 40, 255),
+            )
+    robot = data.get("robotLocation")
+    if isinstance(robot, dict):
+        pos = to_px(float(robot.get("x") or 0), float(robot.get("y") or 0))
+        if pos:
+            draw.ellipse(
+                [pos[0] - 7, pos[1] - 7, pos[0] + 7, pos[1] + 7],
+                fill=(30, 144, 255, 255),
+                outline=(255, 255, 255, 255),
+                width=2,
+            )
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 async def _fetch_persist_map(coordinator: DysonDataUpdateCoordinator, map_id: str):
@@ -1229,25 +1365,42 @@ def _render_live_map_png(
                 continue
             dx, dy = _world_to_px(float(item["x"]), float(item["y"]))
             fill = _DIRT_TYPE_FILL_RGBA.get(item.get("type"), _DIRT_TYPE_FALLBACK_RGBA)
-            draw.ellipse([dx - 4, dy - 4, dx + 4, dy + 4], fill=fill)
+            # 1 Oct 2026: radius 4 -> 7 plus a white rim. A run typically has
+            # only one or two spots, and the old small ochre dot vanished
+            # against the amber CLEAN_PENDING zone fill (95, 80, 35).
+            draw.ellipse(
+                [dx - 7, dy - 7, dx + 7, dy + 7],
+                fill=fill,
+                outline=(255, 255, 255, 255),
+                width=2,
+            )
             if item.get("isUvScanOn"):
-                # Subtle light ring — a secondary signal, not meant to dominate.
+                # Outer cyan ring — distinguishes UV-scan spots from the
+                # white rim every spot now has.
                 draw.ellipse(
-                    [dx - 5, dy - 5, dx + 5, dy + 5],
-                    outline=(255, 255, 255, 180),
+                    [dx - 10, dy - 10, dx + 10, dy + 10],
+                    outline=(80, 200, 255, 255),
+                    width=2,
                 )
 
-        # Obstacles — small upward-pointing triangle, echoing the cone icon
-        # the MyDyson app uses for the same data.
+        # Obstacles — upward-pointing triangle, echoing the cone icon the
+        # MyDyson app uses for the same data. 1 Oct 2026: radius 5 -> 9 with
+        # a white rim, same reasoning as the dirt spots above.
         for item in obstacles:
             if not isinstance(item, dict) or item.get("x") is None:
                 continue
             ox, oy = _world_to_px(float(item["x"]), float(item["y"]))
-            r = 5
+            r = 9
+            # 4 okt 2026: pets (type "pet") get pink so they stand apart from
+            # ordinary obstacles; other/unknown types stay orange.
+            fill = (
+                (240, 90, 200, 255) if item.get("type") == "pet" else (255, 150, 0, 255)
+            )
             draw.polygon(
                 [(ox, oy - r), (ox - r, oy + r), (ox + r, oy + r)],
-                fill=(255, 150, 0, 255),
-                outline=(160, 90, 0, 255),
+                fill=fill,
+                outline=(255, 255, 255, 255),
+                width=2,
             )
 
         # Dock — green filled circle.
@@ -1572,6 +1725,15 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
         # completed-clean renderer below, not surface as "no floor plan".
         device = self.coordinator.device
         if device is not None:
+            # Mapping run (house being mapped): the cleaning endpoint has no
+            # zones yet, the mapping endpoint has the growing occupancy grid.
+            if device.robot_state in _MAPPING_RUN_STATES:
+                mapping = await _fetch_live_map_mapping(self.coordinator)
+                if mapping:
+                    png = _render_live_mapping_png(mapping)
+                    if png is not None:
+                        self._attr_image_last_updated = datetime.now(timezone.utc)
+                        return png
             ha_activity = ROBOT_STATE_TO_HA_STATE.get(device.robot_state)
             if ha_activity in (VacuumActivity.CLEANING, VacuumActivity.RETURNING):
                 live_data = await _fetch_live_map_cleaning(self.coordinator)

@@ -1558,6 +1558,68 @@ class TestRenderLiveMapPng:
                 break
         assert found_away_from_edge, "obstacle marker was clipped to the canvas edge"
 
+    @staticmethod
+    def _colour_counts(png: bytes) -> dict:
+        from collections import Counter
+
+        raw = Image.open(io.BytesIO(png)).convert("RGB").tobytes()
+        return Counter(zip(raw[0::3], raw[1::3], raw[2::3]))
+
+    def _large_pending_zone(self) -> dict:
+        """A +-5 m zone: a ~530 px canvas, so the renderer's small-canvas
+        upscale factor is 1 and pixel counts reflect the real marker size."""
+        zone = self._make_zone(status="CLEAN_PENDING")
+        for seg in zone["presentation"]:
+            for key in ("start", "end"):
+                seg[key] = {"x": seg[key]["x"] * 5, "y": seg[key]["y"] * 5}
+        return zone
+
+    def test_obstacle_marker_is_large_with_white_rim(self):
+        """1 Oct 2026: the old 5 px, rimless marker vanished against an amber
+        CLEAN_PENDING zone (36 orange / 0 white px). Now ~98 / ~83."""
+        png = _render_live_map_png(
+            {"zones": [self._large_pending_zone()], "obstacles": [{"x": 0, "y": 0}]}
+        )
+        assert png is not None
+        counts = self._colour_counts(png)
+        assert counts[(255, 150, 0)] >= 70
+        assert counts[(255, 255, 255)] >= 50
+
+    def test_pet_obstacle_is_pink_not_orange(self):
+        png = _render_live_map_png(
+            {
+                "zones": [self._large_pending_zone()],
+                "obstacles": [{"x": 0, "y": 0, "type": "pet"}],
+            }
+        )
+        assert png is not None
+        counts = self._colour_counts(png)
+        assert counts[(240, 90, 200)] >= 70
+        assert counts[(255, 150, 0)] == 0
+
+    def test_dirt_marker_is_large_with_white_rim(self):
+        png = _render_live_map_png(
+            {
+                "zones": [self._large_pending_zone()],
+                "dirt": [{"x": 0, "y": 0, "type": "solid", "isUvScanOn": False}],
+            }
+        )
+        assert png is not None
+        counts = self._colour_counts(png)
+        assert counts[(210, 165, 80)] >= 80
+        assert counts[(255, 255, 255)] >= 50
+        assert counts[(80, 200, 255)] == 0
+
+    def test_dirt_uv_scan_gets_cyan_ring(self):
+        png = _render_live_map_png(
+            {
+                "zones": [self._large_pending_zone()],
+                "dirt": [{"x": 0, "y": 0, "type": "solid", "isUvScanOn": True}],
+            }
+        )
+        assert png is not None
+        assert self._colour_counts(png)[(80, 200, 255)] >= 80
+
     def test_unknown_dirt_type_falls_back(self):
         """An unrecognised dirt 'type' (future API value) still renders."""
         data = {
@@ -2838,6 +2900,39 @@ class TestDysonFloorPlanImage:
         mock_fetch_clean_maps.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_build_uses_mapping_map_during_mapping_run(self, mock_coordinator):
+        """A mapping run uses live-maps/mapping, not live-maps/cleaning."""
+        entity = self._make_entity(mock_coordinator)
+        mock_coordinator.device.robot_state = "MAPPING_RUNNING"
+        mapping = {"dimensions": {}, "mapData": []}
+        rendered_png = b"\x89PNG mapping"
+
+        with (
+            patch(
+                "custom_components.hass_dyson.image._fetch_live_map_mapping",
+                AsyncMock(return_value=mapping),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._render_live_mapping_png",
+                MagicMock(return_value=rendered_png),
+            ) as mock_render,
+            patch(
+                "custom_components.hass_dyson.image._fetch_live_map_cleaning",
+                AsyncMock(),
+            ) as mock_cleaning,
+            patch(
+                "custom_components.hass_dyson.image.fetch_clean_maps",
+                AsyncMock(),
+            ) as mock_fetch_clean_maps,
+        ):
+            result = await entity._build()
+
+        assert result == rendered_png
+        mock_render.assert_called_once_with(mapping)
+        mock_cleaning.assert_not_awaited()
+        mock_fetch_clean_maps.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_build_uses_live_map_while_returning(self, mock_coordinator):
         """Right after a vacuum.stop, the robot is RETURNING (not CLEANING)
         but the live-maps/cleaning endpoint keeps giving fresh data for the
@@ -3176,3 +3271,140 @@ class TestDysonFloorPlanImage:
         with patch.object(entity, "_build", AsyncMock(return_value=None)) as mock_build:
             await entity.async_update()
         mock_build.assert_called_once()
+
+
+class TestLiveMappingRender:
+    """live-maps/mapping occupancy grid (29 sep 2026 capture: 0 / 1 / 255 / 253)."""
+
+    @staticmethod
+    def _data(width=20, height=30, **extra):
+        grid = [1] * (width * height)
+        data = {
+            "dimensions": {
+                "width": str(width),
+                "height": str(height),
+                "resolution": "0.05",
+                "offsetX": "-5.0",
+                "offsetY": "-5.0",
+            },
+            "mapData": grid,
+            "robotLocation": {"x": "1100.0", "y": "1100.0"},
+            "dockLocation": {"x": "1100.0", "y": "1100.0"},
+        }
+        data.update(extra)
+        return data
+
+    @staticmethod
+    def _px(png):
+        import io as _io
+
+        from PIL import Image
+
+        return Image.open(_io.BytesIO(png)).convert("RGB")
+
+    def test_renders_scaled_png_with_palette(self):
+        data = self._data()
+        data["mapData"][0] = 255
+        png = image_module._render_live_mapping_png(data)
+        assert png is not None
+        img = self._px(png)
+        factor = 800 // 30
+        assert img.size == (20 * factor, 30 * factor)
+        assert img.getpixel((img.width // 2, img.height // 2)) == (45, 70, 95)
+
+    def test_north_is_up_first_grid_row_is_bottom(self):
+        data = self._data()
+        data["mapData"][0] = 255
+        img = self._px(image_module._render_live_mapping_png(data))
+        assert img.getpixel((0, img.height - 1)) == (230, 230, 235)
+        assert img.getpixel((0, 0)) == (45, 70, 95)
+
+    def test_placeholder_markers_outside_grid_are_skipped(self):
+        img = self._px(image_module._render_live_mapping_png(self._data()))
+        colours = {
+            img.getpixel((x, y)) for x in range(img.width) for y in range(img.height)
+        }
+        assert (30, 144, 255) not in colours
+        assert (0, 200, 80) not in colours
+
+    def test_dock_and_robot_drawn_when_inside_grid(self):
+        data = self._data(
+            robotLocation={"x": "-4.5", "y": "-4.5"},
+            dockLocation={"x": "-4.1", "y": "-4.1"},
+        )
+        img = self._px(image_module._render_live_mapping_png(data))
+        colours = {
+            img.getpixel((x, y)) for x in range(img.width) for y in range(img.height)
+        }
+        assert (30, 144, 255) in colours
+        assert (0, 200, 80) in colours
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {},
+            {"dimensions": {"width": "2"}, "mapData": [1]},
+            {
+                "dimensions": {"width": "2", "height": "2", "resolution": "0.05"},
+                "mapData": [1, 1, 1],
+            },
+        ],
+    )
+    def test_invalid_data_returns_none(self, data):
+        assert image_module._render_live_mapping_png(data) is None
+
+
+class TestFetchLiveMapMapping:
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        image_module._live_mapping_cache._store.clear()
+        image_module._live_mapping_locks.clear()
+        yield
+        image_module._live_mapping_cache._store.clear()
+        image_module._live_mapping_locks.clear()
+
+    @staticmethod
+    def _coord(client):
+        coordinator = MagicMock()
+        coordinator.serial_number = "7VS-EU-VFA2680A"
+
+        @asynccontextmanager
+        async def make_client():
+            yield client
+
+        coordinator.async_cloud_client = make_client
+        return coordinator
+
+    @pytest.mark.asyncio
+    async def test_returns_and_caches(self):
+        client = AsyncMock()
+        client.get_live_map_mapping = AsyncMock(return_value={"mapData": [1]})
+        coord = self._coord(client)
+        first = await image_module._fetch_live_map_mapping(coord)
+        second = await image_module._fetch_live_map_mapping(coord)
+        assert first == second == {"mapData": [1]}
+        client.get_live_map_mapping.assert_awaited_once_with("7VS-EU-VFA2680A")
+
+    @pytest.mark.asyncio
+    async def test_retries_once_on_429(self):
+        from libdyson_rest.exceptions import DysonAPIError
+
+        client = AsyncMock()
+        client.get_live_map_mapping = AsyncMock(
+            side_effect=[DysonAPIError("429 Too Many Requests"), {"mapData": [1]}]
+        )
+        with patch("custom_components.hass_dyson.image.asyncio.sleep", AsyncMock()):
+            result = await image_module._fetch_live_map_mapping(self._coord(client))
+        assert result == {"mapData": [1]}
+        assert client.get_live_map_mapping.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_404_returns_none_not_cached(self):
+        from libdyson_rest.exceptions import DysonAPIError
+
+        client = AsyncMock()
+        client.get_live_map_mapping = AsyncMock(side_effect=DysonAPIError("404"))
+        coord = self._coord(client)
+        assert await image_module._fetch_live_map_mapping(coord) is None
+        assert await image_module._fetch_live_map_mapping(coord) is None
+        assert client.get_live_map_mapping.await_count == 2
