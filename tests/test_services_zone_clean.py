@@ -426,3 +426,42 @@ class TestSetZoneBehaviourService:
                     {"device_id": "dev", "zone": "Kitchen"},
                 )
         client.put_mock.assert_not_awaited()
+
+
+class TestStartZoneCleanAppCompatibleOverride:
+    async def _run(self, coordinator, data):
+        with (
+            patch(
+                "custom_components.hass_dyson.services._get_coordinator_from_device_id",
+                AsyncMock(return_value=coordinator),
+            ),
+            patch(
+                "custom_components.hass_dyson.services._fetch_persistent_map_metadata",
+                AsyncMock(return_value=_two_maps()),
+            ),
+        ):
+            await _handle_start_zone_clean(MagicMock(), _call(data))
+
+    @pytest.mark.asyncio
+    async def test_false_forces_legacy_on_rb05(self):
+        coordinator = _make_coordinator()
+        coordinator.device.mqtt_prefix = "RB05"
+        await self._run(
+            coordinator,
+            {"device_id": "d", "zones": ["Kitchen"], "app_compatible": False},
+        )
+        kwargs = coordinator.device.robot_start_clean.call_args.kwargs
+        assert kwargs["app_compatible"] is False
+        assert kwargs["cleaning_programme"]["orderedZones"] == []
+
+    @pytest.mark.asyncio
+    async def test_true_forces_app_shape_elsewhere(self):
+        coordinator = _make_coordinator()
+        coordinator.device.mqtt_prefix = "N223"
+        await self._run(
+            coordinator,
+            {"device_id": "d", "zones": ["Kitchen"], "app_compatible": True},
+        )
+        kwargs = coordinator.device.robot_start_clean.call_args.kwargs
+        assert kwargs["app_compatible"] is True
+        assert "orderedZones" not in kwargs["cleaning_programme"]

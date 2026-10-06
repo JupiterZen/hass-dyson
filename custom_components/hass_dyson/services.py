@@ -193,6 +193,7 @@ SERVICE_START_ZONE_CLEAN_SCHEMA = vol.Schema(
             cv.ensure_list, [vol.All(str, vol.Length(min=1))], vol.Length(min=1)
         ),
         vol.Optional("map"): vol.All(str, vol.Length(min=1)),
+        vol.Optional("app_compatible"): cv.boolean,
     }
 )
 
@@ -910,7 +911,9 @@ async def _handle_start_zone_clean(hass: HomeAssistant, call: ServiceCall) -> No
     # silently downgrades the START to a global (whole-house) clean.
     # RB05 robots (MQTT prefix "RB05"): mirror the MyDyson app's own START,
     # which sends only persistentMapId + unorderedZones (captured 1 okt 2026).
-    app_compatible = getattr(coordinator.device, "mqtt_prefix", None) == "RB05"
+    app_compatible = call.data.get("app_compatible")
+    if app_compatible is None:
+        app_compatible = getattr(coordinator.device, "mqtt_prefix", None) == "RB05"
     cleaning_programme = {
         "persistentMapId": pmap_id,
         "unorderedZones": resolved_ids,

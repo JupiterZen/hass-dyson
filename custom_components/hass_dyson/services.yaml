@@ -148,6 +148,16 @@ start_zone_clean:
         reports one, then a single stored map, then the map the requested
         zones uniquely belong to.
       required: false
+    app_compatible:
+      name: App-compatible START
+      description: >-
+        Send the START exactly as the MyDyson app does (mode-reason RAPP, no
+        fullCleanType, bare cleaning programme). When omitted, RB05 robots use
+        it and other devices keep the legacy payload. Set false to force the
+        legacy LAPP payload on an RB05 (for testing).
+      required: false
+      selector:
+        boolean:
       example: Downstairs
       selector:
         text:
