@@ -3552,6 +3552,11 @@ _ROBOT_FAULT_CODE_LABELS: dict[str, str] = {
     # nextActionRequired=USER_CONTINUE mid-mop — the dock's clean-water
     # tank was empty.
     "581": "Clean water tank empty",
+    # Confirmed live 6 okt 2026: the robot paused itself mid-clean with
+    # nextActionRequired=USER_CONTINUE and the MyDyson app showed "borstelfout"
+    # (brush fault). Same code at the self-initiated pause on 3 okt 2026, when
+    # a piece of string was stuck in the brush.
+    "570": "Brush fault",
     # Confirmed live 7 sep 2026: seen during dockState=DRYING_MOP with
     # nextActionRequired=LOG_ONLY — informational only, no user action.
     "2105": "Drying (informational)",
