@@ -5123,23 +5123,31 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
         self._publish_state()
 
     def _absorb_zones(self, zones: list) -> bool:
-        """Add CLEAN_COMPLETE zone names to the tally; True if none is unresolved."""
+        """Add CLEAN_COMPLETE zone names to the tally.
+
+        Returns True when at least one zone was requested and every requested
+        zone is resolved. Rooms that were never part of the run
+        (``CLEAN_NOT_REQUESTED``, e.g. deselected in HA) do not count: before
+        6 okt 2026 they did, so a partial selection never reached the
+        reset-after-complete-run and the tally stayed until midnight.
+        """
         all_resolved = True
+        requested = 0
         for zone in zones:
             if not isinstance(zone, dict):
                 continue
             name = zone.get("name")
             status = zone.get("cleanStatus")
-            if not isinstance(name, str):
+            if not isinstance(name, str) or status == "CLEAN_NOT_REQUESTED":
                 continue
+            requested += 1
             if status == "CLEAN_COMPLETE":
                 self._completed_zone_names.add(name)
             elif status != "CANT_CLEAN":
-                # CLEAN_NOT_REQUESTED/_PENDING/_IN_PROGRESS — run not fully
-                # resolved yet, so this can't be "the finish line" for the
-                # reset-after-complete-run check.
+                # _PENDING/_IN_PROGRESS — run not fully resolved yet, so this
+                # can't be "the finish line" for the reset check.
                 all_resolved = False
-        return all_resolved
+        return all_resolved and requested > 0
 
     async def _async_finalize_from_history(self) -> None:
         """After cleaning stops, merge the finished clean's zones from the cloud.

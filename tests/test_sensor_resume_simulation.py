@@ -565,3 +565,52 @@ class TestFinalizeFromHistoryAfterDock:
                 await sensor.async_update()
 
         assert sensor._finalize_pending is False
+
+
+class TestPartialSelectionResets:
+    """Rooms that were never requested must not block the end-of-run reset."""
+
+    @pytest.mark.asyncio
+    async def test_not_requested_rooms_do_not_block_reset(self, mock_robot_coordinator):
+        sensor = _sensor_with_hass(mock_robot_coordinator, reset_toggle_state="on")
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(
+                zones=[
+                    _zone("Keuken", "CLEAN_COMPLETE"),
+                    _zone("Gang", "CLEAN_COMPLETE"),
+                    _zone("Woonkamer", "CLEAN_NOT_REQUESTED"),
+                    _zone("Kinderkamer", "CLEAN_NOT_REQUESTED"),
+                ]
+            )
+        )
+        await sensor.async_update()
+        assert sensor._attr_native_value == 0
+
+    @pytest.mark.asyncio
+    async def test_pending_requested_room_still_blocks_reset(
+        self, mock_robot_coordinator
+    ):
+        sensor = _sensor_with_hass(mock_robot_coordinator, reset_toggle_state="on")
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(
+                zones=[
+                    _zone("Keuken", "CLEAN_COMPLETE"),
+                    _zone("Gang", "CLEAN_PENDING"),
+                    _zone("Woonkamer", "CLEAN_NOT_REQUESTED"),
+                ]
+            )
+        )
+        await sensor.async_update()
+        assert sensor._attr_native_value == 1
+
+    @pytest.mark.asyncio
+    async def test_nothing_requested_never_resets(self, mock_robot_coordinator):
+        sensor = _sensor_with_hass(mock_robot_coordinator, reset_toggle_state="on")
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(zones=[_zone("Woonkamer", "CLEAN_NOT_REQUESTED")])
+        )
+        sensor._completed_zone_names = {"Keuken"}
+        sensor._tracked_clean_id = "clean-1"
+        sensor._last_reset_date = sensor._today_str()
+        await sensor.async_update()
+        assert sensor._completed_zone_names == {"Keuken"}
