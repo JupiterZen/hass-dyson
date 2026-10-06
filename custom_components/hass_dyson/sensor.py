@@ -49,6 +49,7 @@ Sensor States:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -5264,10 +5265,20 @@ class DysonRobotRoomPreferencesSensor(DysonEntity, SensorEntity):
         for row in data.get("room") or []:
             if not isinstance(row, list) or len(row) < 12:
                 continue
+            name, room_type = row[1], None
+            if isinstance(name, str) and name.startswith("{"):
+                # Seen from 6 okt 2026: the robot sends {"type":..,"name":..}
+                # instead of the bare name.
+                try:
+                    parsed = json.loads(name)
+                    name, room_type = parsed.get("name", name), parsed.get("type")
+                except ValueError:
+                    pass
             rooms.append(
                 {
                     "id": row[0],
-                    "naam": row[1],
+                    "naam": name,
+                    "type": room_type,
                     "cleanType": _pref_label(_PREF_CLEAN_TYPE, row[3]),
                     "strategie": _pref_label(_PREF_STRATEGY, row[4]),
                     "water": _pref_label(_PREF_WATER, row[5]),

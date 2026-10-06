@@ -149,3 +149,19 @@ class TestSensor:
         coordinator.data = {"jdm-properties": {"map_id": "42"}}
         await sensor.async_update()
         coordinator.device.request_robot_room_preferences.assert_awaited_with("42")
+
+
+def test_json_room_name_is_unpacked(sensor, coordinator):
+    row = [10, '{"type":"livingRoom","name":"Woonkamer"}', 2, 1, 0, 2, 1, 0, 1, 0, 1, 0]
+    coordinator._handle_jdm_status_message(
+        {
+            "code": 0,
+            "method": "service.get_preference",
+            "data": {"room": [row], "prefer_on": 0},
+        }
+    )
+    room = sensor.extra_state_attributes["kamers"][0]
+    assert room["naam"] == "Woonkamer"
+    assert room["type"] == "livingRoom"
+    assert room["cleanType"] == "vacuumAndMop"
+    assert room["raw"][0] == 2
