@@ -4556,6 +4556,21 @@ class DysonDevice:
             }
         )
 
+    async def request_robot_room_preferences(self, map_id: str | None) -> None:
+        """Ask the robot for its own per-room settings over the jdm protocol.
+
+        Read-only (``service.get_preference``, the same call the MyDyson app
+        makes repeatedly); the answer arrives on ``status/jdm`` and is stored
+        by the coordinator. Without a known map id, ask for the map list
+        first so the id can be learned.
+        """
+        if map_id is None:
+            await self._send_robot_jdm_command("service.get_map_list", {})
+            return
+        await self._send_robot_jdm_command(
+            "service.get_preference", {"map_id": int(map_id)}
+        )
+
     async def set_robot_voice_notifications(self, enabled: bool) -> None:
         """Set whether the robot gives spoken voice notifications.
 

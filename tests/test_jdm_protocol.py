@@ -263,3 +263,35 @@ class TestDysonRobotVoiceNotificationsSwitch:
         )
         entity = DysonRobotVoiceNotificationsSwitch(mock_coordinator)
         await entity.async_turn_on()  # Should not raise, just log
+
+
+class TestRequestRobotRoomPreferences:
+    @pytest.mark.asyncio
+    async def test_sends_get_preference_with_int_map_id(self):
+        device = DysonDevice(
+            hass=MagicMock(),
+            serial_number="RB05-EU-TST0000A",
+            host="h",
+            credential="c",
+            mqtt_prefix="RB05",
+        )
+        device._send_robot_jdm_command = AsyncMock()
+        await device.request_robot_room_preferences("1790712695")
+        device._send_robot_jdm_command.assert_awaited_once_with(
+            "service.get_preference", {"map_id": 1790712695}
+        )
+
+    @pytest.mark.asyncio
+    async def test_asks_map_list_without_map_id(self):
+        device = DysonDevice(
+            hass=MagicMock(),
+            serial_number="RB05-EU-TST0000A",
+            host="h",
+            credential="c",
+            mqtt_prefix="RB05",
+        )
+        device._send_robot_jdm_command = AsyncMock()
+        await device.request_robot_room_preferences(None)
+        device._send_robot_jdm_command.assert_awaited_once_with(
+            "service.get_map_list", {}
+        )

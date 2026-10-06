@@ -25,7 +25,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -758,6 +758,9 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         try:
             method = data.get("method")
+            if method in ("service.get_preference", "service.get_map_list"):
+                self._store_jdm_service_response(method, data)
+                return
             if method != "prop.post":
                 return
             params = data.get("params")
@@ -774,6 +777,41 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         except Exception as e:  # noqa: BLE001 — never let a parse error kill the MQTT loop
             _LOGGER.warning("Error handling jdm status message: %s", e)
+
+    def _store_jdm_service_response(self, method: str, data: dict[str, Any]) -> None:
+        """Keep the latest jdm ``get_preference``/``get_map_list`` answer.
+
+        ``get_preference`` carries the robot's own per-room settings (decoded
+        in ``sensor.DysonRobotRoomPreferencesSensor``) and ``prefer_on``;
+        ``get_map_list`` gives the current map id when the MQTT state stream
+        has not reported one (idle on the dock).
+        """
+        payload = data.get("data")
+        if data.get("code") not in (0, None) or not isinstance(payload, dict):
+            return
+        if not self.data:
+            self.data = {}
+        jdm_properties = self.data.setdefault("jdm-properties", {})
+        if method == "service.get_preference":
+            jdm_properties["preference"] = {
+                "data": payload,
+                "received": datetime.now(timezone.utc).isoformat(),
+            }
+        else:
+            maps = payload.get("map_list")
+            current = next(
+                (
+                    m.get("id")
+                    for m in maps or []
+                    if isinstance(m, dict) and m.get("cur")
+                ),
+                None,
+            )
+            if current is not None:
+                jdm_properties["map_id"] = str(current)
+        self.hass.loop.call_soon_threadsafe(
+            lambda: self.async_set_updated_data(self.data)
+        )
 
     def _handle_firmware_update_status(self, topic: str, data: dict[str, Any]) -> None:
         """Handle firmware update status messages from /status/software topic.

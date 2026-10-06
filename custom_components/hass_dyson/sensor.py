@@ -1551,6 +1551,7 @@ async def async_setup_entry(  # noqa: C901
             # later. Created unconditionally for robot devices, same as
             # the voice-download sensor.
             entities.append(DysonRobotActiveFaultSensor(coordinator))
+            entities.append(DysonRobotRoomPreferencesSensor(coordinator))
             # Cloud-fetched cleaning history + Dyson's recommended-next-room
             # sensor. Both gated on cloud auth.
             if coordinator.config_entry.data.get("auth_token"):
@@ -5177,3 +5178,103 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
             self._publish_state()
         elif self._finalize_attempts >= 6:
             self._finalize_pending = False
+
+
+# jdm ``service.get_preference`` room rows are [zone_id, name, 10 ints]. Decoded
+# on 30 sep 2026 by before/after comparison: index 3 = cleanType, 4 = strategy,
+# 5 = water level; index 10 = order (confirmed against persistent-map-metadata
+# on 5 okt 2026). The other positions are not understood and are passed
+# through raw. ``quick`` strategy was never observed, so unknown values are
+# shown as ``onbekend(<n>)`` instead of guessed.
+_PREF_CLEAN_TYPE = {0: "vacuum", 1: "vacuumAndMop"}
+_PREF_STRATEGY = {0: "auto", 1: "boost", 2: "quiet"}
+_PREF_WATER = {0: "low", 1: "medium", 2: "high"}
+_PREF_REQUEST_INTERVAL = 300.0
+
+
+def _pref_label(table: dict[int, str], value: Any) -> str:
+    return table.get(value, f"onbekend({value})") if isinstance(value, int) else "?"
+
+
+class DysonRobotRoomPreferencesSensor(DysonEntity, SensorEntity):
+    """The robot's own per-room settings and ``prefer_on``, via jdm.
+
+    State is ``prefer_on`` (``aan``/``uit``; meaning not established — it was
+    1 on 30 sep and 0 on 5 okt 2026). Attributes carry the decoded rooms so
+    the settings the robot itself holds can be compared with the cloud
+    metadata and the HA selects before a run, and so recorder history shows
+    when they change. Asks the robot at most every five minutes (read-only).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_room_preferences"
+        self._attr_name = "Robot Kamervoorkeuren"
+        self._attr_icon = "mdi:tune-vertical"
+        self._last_request: float | None = None
+
+    @property
+    def should_poll(self) -> bool:
+        return True
+
+    def _preference(self) -> dict[str, Any] | None:
+        jdm = (self.coordinator.data or {}).get("jdm-properties", {})
+        pref = jdm.get("preference")
+        return pref if isinstance(pref, dict) else None
+
+    async def async_update(self) -> None:
+        device = self.coordinator.device
+        now = time.monotonic()
+        if device is None or (
+            self._last_request is not None
+            and now - self._last_request < _PREF_REQUEST_INTERVAL
+        ):
+            return
+        self._last_request = now
+        jdm = (self.coordinator.data or {}).get("jdm-properties", {})
+        map_id = getattr(device, "robot_current_map_id", None) or jdm.get("map_id")
+        await device.request_robot_room_preferences(map_id)
+
+    @property
+    def native_value(self) -> str | None:
+        pref = self._preference()
+        if not pref:
+            return None
+        value = pref["data"].get("prefer_on")
+        if value in (0, 1):
+            return "aan" if value else "uit"
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        pref = self._preference()
+        if not pref:
+            return {}
+        data = pref["data"]
+        rooms = []
+        for row in data.get("room") or []:
+            if not isinstance(row, list) or len(row) < 12:
+                continue
+            rooms.append(
+                {
+                    "id": row[0],
+                    "naam": row[1],
+                    "cleanType": _pref_label(_PREF_CLEAN_TYPE, row[3]),
+                    "strategie": _pref_label(_PREF_STRATEGY, row[4]),
+                    "water": _pref_label(_PREF_WATER, row[5]),
+                    "volgorde": row[10],
+                    "raw": row[2:],
+                }
+            )
+        rooms.sort(
+            key=lambda r: r["volgorde"] if isinstance(r["volgorde"], int) else 99
+        )
+        return {
+            "prefer_on": data.get("prefer_on"),
+            "kamers": rooms,
+            "uv_switch": data.get("uv_switch"),
+            "material": data.get("material"),
+            "ontvangen": pref.get("received"),
+        }
