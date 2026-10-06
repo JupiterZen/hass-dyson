@@ -1552,6 +1552,8 @@ async def async_setup_entry(  # noqa: C901
             # the voice-download sensor.
             entities.append(DysonRobotActiveFaultSensor(coordinator))
             entities.append(DysonRobotRoomPreferencesSensor(coordinator))
+            if coordinator.config_entry.data.get("auth_token"):
+                entities.append(DysonRobotPlannedCleanEstimateSensor(coordinator))
             # Cloud-fetched cleaning history + Dyson's recommended-next-room
             # sensor. Both gated on cloud auth.
             if coordinator.config_entry.data.get("auth_token"):
@@ -5283,3 +5285,115 @@ class DysonRobotRoomPreferencesSensor(DysonEntity, SensorEntity):
             "material": data.get("material"),
             "ontvangen": pref.get("received"),
         }
+
+
+_ESTIMATE_REFRESH_SECONDS = 600.0
+
+
+class DysonRobotPlannedCleanEstimateSensor(DysonEntity, SensorEntity):
+    """Estimated duration (minutes) of the clean the HA room switches describe.
+
+    Asks the same cloud endpoint the MyDyson app uses for its pre-start
+    estimate, for the rooms whose ``Target <room>`` switch is on and their
+    stored per-room settings. Read-only. Recomputed when the selected rooms
+    change and otherwise at most every ten minutes; on a failure (Cloudflare
+    504s are common) the last good value is kept and ``fout`` is set.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+    _attr_native_unit_of_measurement = "min"
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_planned_clean_estimate"
+        self._attr_name = "Geplande Beurt Duur"
+        self._attr_icon = "mdi:timer-outline"
+        self._key: tuple[str, ...] | None = None
+        self._fetched_at: float | None = None
+        self._duration: int | None = None
+        self._extra: dict[str, Any] = {}
+
+    @property
+    def should_poll(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> int | None:
+        return self._duration
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._extra
+
+    def _selected_zone_names(self) -> list[str]:
+        from homeassistant.helpers import entity_registry as er
+
+        prefix = f"{self.coordinator.serial_number}_zone_target_"
+        names: list[str] = []
+        for entry in er.async_entries_for_config_entry(
+            er.async_get(self.hass), self.coordinator.config_entry.entry_id
+        ):
+            if entry.domain != "switch" or not (entry.unique_id or "").startswith(
+                prefix
+            ):
+                continue
+            state = self.hass.states.get(entry.entity_id)
+            if state is not None and state.state == "on":
+                name = state.attributes.get("zone_name") or state.name
+                if name:
+                    names.append(str(name))
+        return names
+
+    async def async_update(self) -> None:
+        from .services import _fetch_zone_settings_for_current_map, _post_clean_estimate
+
+        selected = sorted(self._selected_zone_names())
+        key = tuple(selected)
+        now = time.monotonic()
+        fresh = (
+            self._fetched_at is not None
+            and now - self._fetched_at < _ESTIMATE_REFRESH_SECONDS
+        )
+        if key == self._key and fresh:
+            return
+        if not selected:
+            self._key, self._fetched_at = key, now
+            self._duration = None
+            self._extra = {"kamers": [], "laadstops": None, "fout": None}
+            return
+
+        try:
+            current = await _fetch_zone_settings_for_current_map(self.coordinator)
+            if current is None:
+                raise RuntimeError("geen kaartinstellingen beschikbaar")
+            map_id, zones = current
+            chosen = [z for z in zones if z.get("name") in selected]
+            if not chosen:
+                raise RuntimeError("geselecteerde kamers niet gevonden op de kaart")
+            async with self.coordinator.async_cloud_client() as client:
+                if client is None:
+                    raise RuntimeError("geen cloud-verbinding")
+                answer = await _post_clean_estimate(
+                    client, self.coordinator.serial_number, map_id, chosen
+                )
+            duration = answer.get("duration")
+            self._duration = duration if isinstance(duration, int) else None
+            self._extra = {
+                "kamers": [
+                    z["name"]
+                    for z in sorted(
+                        chosen,
+                        key=lambda z: (
+                            z["order"] if isinstance(z.get("order"), int) else 99
+                        ),
+                    )
+                ],
+                "laadstops": answer.get("charges"),
+                "fout": None,
+            }
+        except Exception as err:  # noqa: BLE001 — keep the last good value
+            _LOGGER.debug(
+                "Clean estimate failed for %s: %s", self.coordinator.serial_number, err
+            )
+            self._extra = {**self._extra, "fout": str(err)[:200]}
+        self._key, self._fetched_at = key, now

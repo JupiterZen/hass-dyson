@@ -1041,6 +1041,55 @@ async def _fetch_zone_settings_metadata(client, serial_number: str) -> list[dict
     return data
 
 
+async def _post_clean_estimate(
+    client, serial_number: str, map_id: str, zones: list[dict]
+) -> dict:
+    """POST the app-shaped clean-estimation request and return its answer.
+
+    ``libdyson_rest.get_clean_estimation`` sends ``{"zoneIds": [...]}``, which
+    is not what the MyDyson app sends. The app (captured 6 okt 2026) sends
+    ``{"zones": [{"id", "area", "settings"}]}`` in the map's ``order``; the
+    answer is ``{"duration": <min>, "charges": <n>}``. ``area`` is required
+    (without it the endpoint returns 400, checked live). Cloudflare 504s are
+    common for large selections; the caller handles errors.
+
+    Raises:
+        DysonAuthError: If the token has expired.
+        DysonAPIError: On any other HTTP failure.
+    """
+    import httpx
+    from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
+    from libdyson_rest.utils import get_api_hostname
+
+    ordered = sorted(
+        zones, key=lambda z: z["order"] if isinstance(z.get("order"), int) else 99
+    )
+    body = {
+        "zones": [
+            {"id": z["id"], "area": z.get("area"), "settings": z.get("settings")}
+            for z in ordered
+        ]
+    }
+    http_client = await client._get_client()  # noqa: SLF001 — no public accessor
+    url = (
+        f"{get_api_hostname(client.country).rstrip('/')}/v2/app/{serial_number}"
+        f"/persistent-maps/{map_id}/clean-estimation"
+    )
+    try:
+        response = await http_client.post(url, json=body)
+        response.raise_for_status()
+        data = response.json()
+    except httpx.HTTPStatusError as err:
+        if err.response.status_code == 401:
+            raise DysonAuthError("Authentication token expired or invalid") from err
+        raise DysonAPIError(f"Failed to get clean estimate: {err}") from err
+    except (httpx.RequestError, ValueError) as err:
+        raise DysonAPIError(f"Failed to get clean estimate: {err}") from err
+    if not isinstance(data, dict):
+        raise DysonAPIError("Expected object in clean-estimation response")
+    return data
+
+
 async def _put_zone_settings_metadata(
     client, serial_number: str, map_id: str, zones: list[dict]
 ) -> None:
