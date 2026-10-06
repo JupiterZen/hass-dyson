@@ -212,6 +212,7 @@ set_zone_behaviour:
       selector:
         select:
           options:
+            - veryLow
             - low
             - medium
             - high

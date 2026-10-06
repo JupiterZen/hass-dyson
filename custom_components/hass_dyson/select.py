@@ -35,12 +35,14 @@ _LOGGER = logging.getLogger(__name__)
 _ZONE_SELECT_MANIFEST_REFRESH_DEBOUNCE: float = 5.0
 
 # clean_type × water_level, collapsed into one human-friendly axis — this
-# is also how the MyDyson app presents it (one picker, not two). Only "low"/
-# "medium"/"high" water levels and "vacuum"/"vacuumAndMop" clean types have
-# been observed on the wire (2026-09-30 captures); no other combinations
-# confirmed.
+# is also how the MyDyson app presents it (one picker, not two). The
+# "veryLow"/"low"/"medium"/"high" water levels and "vacuum"/"vacuumAndMop"
+# clean types are observed on the wire ("veryLow" = "zeer laag", from the app
+# on 6 okt 2026, the others from the 2026-09-30 captures); no other
+# combinations confirmed.
 _ZONE_CLEAN_TYPE_OPTIONS: dict[str, tuple[str, str | None]] = {
     "Alleen stofzuigen": ("vacuum", None),
+    "Stofzuigen + dweilen (zeer laag water)": ("vacuumAndMop", "veryLow"),
     "Stofzuigen + dweilen (laag water)": ("vacuumAndMop", "low"),
     "Stofzuigen + dweilen (gemiddeld water)": ("vacuumAndMop", "medium"),
     "Stofzuigen + dweilen (hoog water)": ("vacuumAndMop", "high"),

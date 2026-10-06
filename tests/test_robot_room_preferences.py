@@ -165,3 +165,15 @@ def test_json_room_name_is_unpacked(sensor, coordinator):
     assert room["type"] == "livingRoom"
     assert room["cleanType"] == "vacuumAndMop"
     assert room["raw"][0] == 2
+
+
+def test_water_level_99_is_very_low(sensor, coordinator):
+    row = [14, "Keuken", 0, 1, 0, 99, 0, 0, 1, 0, 2, 0]
+    coordinator._handle_jdm_status_message(
+        {
+            "code": 0,
+            "method": "service.get_preference",
+            "data": {"room": [row], "prefer_on": 1},
+        }
+    )
+    assert sensor.extra_state_attributes["kamers"][0]["water"] == "veryLow"

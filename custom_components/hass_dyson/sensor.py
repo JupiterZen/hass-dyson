@@ -5208,7 +5208,7 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
 # shown as ``onbekend(<n>)`` instead of guessed.
 _PREF_CLEAN_TYPE = {0: "vacuum", 1: "vacuumAndMop"}
 _PREF_STRATEGY = {0: "auto", 1: "boost", 2: "quiet"}
-_PREF_WATER = {0: "low", 1: "medium", 2: "high"}
+_PREF_WATER = {0: "low", 1: "medium", 2: "high", 99: "veryLow"}
 _PREF_REQUEST_INTERVAL = 300.0
 
 

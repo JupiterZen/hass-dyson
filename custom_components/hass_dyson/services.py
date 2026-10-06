@@ -218,7 +218,7 @@ SERVICE_START_ZONE_CLEAN_SCHEMA = vol.Schema(
 # captured making an actual settings change.
 _ZONE_CLEANING_STRATEGIES = ("auto", "quick", "quiet", "boost")
 _ZONE_CLEAN_TYPES = ("vacuum", "vacuumAndMop")
-_ZONE_WATER_LEVELS = ("low", "medium", "high")
+_ZONE_WATER_LEVELS = ("veryLow", "low", "medium", "high")
 SERVICE_SET_ZONE_BEHAVIOUR_SCHEMA = vol.Schema(
     {
         vol.Required("device_id"): str,
