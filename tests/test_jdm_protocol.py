@@ -295,3 +295,48 @@ class TestRequestRobotRoomPreferences:
         device._send_robot_jdm_command.assert_awaited_once_with(
             "service.get_map_list", {}
         )
+
+
+class TestRobotStartCleanAppCompatible:
+    @pytest.mark.asyncio
+    async def test_app_compatible_start_matches_the_app(self):
+        device = DysonDevice(
+            hass=MagicMock(),
+            serial_number="RB05-EU-TST0000A",
+            host="h",
+            credential="c",
+            mqtt_prefix="RB05",
+        )
+        device._connected = True
+        device._mqtt_client = MagicMock(is_connected=MagicMock(return_value=True))
+        device._send_robot_command = AsyncMock()
+        programme = {"persistentMapId": "1", "unorderedZones": ["14"]}
+        await device.robot_start_clean(
+            cleaning_mode="zoneConfigured",
+            full_clean_type="immediate",
+            cleaning_programme=programme,
+            app_compatible=True,
+        )
+        sent = device._send_robot_command.call_args[0][0]
+        assert sent["mode-reason"] == "RAPP"
+        assert "fullCleanType" not in sent
+        assert sent["cleaningMode"] == "zoneConfigured"
+        assert sent["cleaningProgramme"] == programme
+        assert sent["msg"] == "START"
+
+    @pytest.mark.asyncio
+    async def test_default_start_unchanged(self):
+        device = DysonDevice(
+            hass=MagicMock(),
+            serial_number="RB05-EU-TST0000A",
+            host="h",
+            credential="c",
+            mqtt_prefix="RB05",
+        )
+        device._connected = True
+        device._mqtt_client = MagicMock(is_connected=MagicMock(return_value=True))
+        device._send_robot_command = AsyncMock()
+        await device.robot_start_clean(cleaning_mode="global")
+        sent = device._send_robot_command.call_args[0][0]
+        assert sent["mode-reason"] == "LAPP"
+        assert sent["fullCleanType"] == "immediate"

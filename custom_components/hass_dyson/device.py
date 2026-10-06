@@ -3980,6 +3980,7 @@ class DysonDevice:
         cleaning_mode: str = "global",
         full_clean_type: str = "immediate",
         cleaning_programme: dict | None = None,
+        app_compatible: bool = False,
     ) -> None:
         """Start a robot vacuum cleaning operation.
 
@@ -4016,6 +4017,14 @@ class DysonDevice:
             "mode-reason": "LAPP",
             "time": self._get_command_timestamp(),
         }
+        if app_compatible:
+            # The MyDyson app's own START (captured 1 okt 2026) carries
+            # "mode-reason": "RAPP" and no "fullCleanType". HA-started runs
+            # kept getting settings other than the stored ones (6 okt 2026),
+            # and LAPP vs RAPP is the main difference; whether it is the cause
+            # is untested.
+            command_data["mode-reason"] = "RAPP"
+            command_data.pop("fullCleanType")
         if cleaning_programme is not None:
             command_data["cleaningProgramme"] = cleaning_programme
 

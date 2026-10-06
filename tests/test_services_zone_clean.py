@@ -192,6 +192,34 @@ class TestStartZoneCleanService:
         assert programme["zonesDefinitionLastUpdatedDate"] == "2026-07-10T14:09:15Z"
 
     @pytest.mark.asyncio
+    async def test_rb05_start_mirrors_the_app(self):
+        """RB05 (MQTT prefix RB05): app-shaped programme, RAPP, no extras."""
+        coordinator = _make_coordinator()
+        coordinator.device.mqtt_prefix = "RB05"
+        await self._run(
+            coordinator,
+            _two_maps(),
+            {"device_id": "dev", "zones": ["Kitchen"]},
+        )
+        kwargs = coordinator.device.robot_start_clean.call_args.kwargs
+        assert kwargs["app_compatible"] is True
+        assert kwargs["cleaning_programme"] == {
+            "persistentMapId": "map-down",
+            "unorderedZones": ["5"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_other_devices_keep_the_legacy_programme(self):
+        coordinator = _make_coordinator()
+        coordinator.device.mqtt_prefix = "N223"
+        await self._run(
+            coordinator, _two_maps(), {"device_id": "dev", "zones": ["Kitchen"]}
+        )
+        kwargs = coordinator.device.robot_start_clean.call_args.kwargs
+        assert kwargs["app_compatible"] is False
+        assert kwargs["cleaning_programme"]["orderedZones"] == []
+
+    @pytest.mark.asyncio
     async def test_explicit_map_targets_that_map(self):
         """map: Downstairs resolves duplicate zone names on that map."""
         coordinator = _make_coordinator()

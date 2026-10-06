@@ -908,20 +908,25 @@ async def _handle_start_zone_clean(hass: HomeAssistant, call: ServiceCall) -> No
     # IMPORTANT: zonesDefinitionLastUpdatedDate must be included for the
     # device to honour the zoneConfigured request. Without it, the device
     # silently downgrades the START to a global (whole-house) clean.
+    # RB05 robots (MQTT prefix "RB05"): mirror the MyDyson app's own START,
+    # which sends only persistentMapId + unorderedZones (captured 1 okt 2026).
+    app_compatible = getattr(coordinator.device, "mqtt_prefix", None) == "RB05"
     cleaning_programme = {
         "persistentMapId": pmap_id,
-        "orderedZones": [],
         "unorderedZones": resolved_ids,
     }
-    zdlud = pmap.zones_definition_last_updated_date
-    if zdlud:
-        cleaning_programme["zonesDefinitionLastUpdatedDate"] = zdlud
+    if not app_compatible:
+        cleaning_programme["orderedZones"] = []
+        zdlud = pmap.zones_definition_last_updated_date
+        if zdlud:
+            cleaning_programme["zonesDefinitionLastUpdatedDate"] = zdlud
 
     try:
         await coordinator.device.robot_start_clean(
             cleaning_mode="zoneConfigured",
             full_clean_type="immediate",
             cleaning_programme=cleaning_programme,
+            app_compatible=app_compatible,
         )
         _LOGGER.info(
             "Started zone clean on %s: zones=%s (map %s)",
