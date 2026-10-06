@@ -661,6 +661,9 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Received message update for %s on topic %s", self.serial_number, topic
         )
 
+        if "/jdm" in topic:
+            self._record_jdm(topic, data)
+
         # Handle firmware update progress messages on /status/software topic
         if topic.endswith("/status/software"):
             _LOGGER.debug("Received firmware update status message: %s", data)
@@ -777,6 +780,20 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         except Exception as e:  # noqa: BLE001 — never let a parse error kill the MQTT loop
             _LOGGER.warning("Error handling jdm status message: %s", e)
+
+    def _record_jdm(self, topic: str, data: dict[str, Any]) -> None:
+        """Append a jdm message to the flight-recorder file (never raises)."""
+        try:
+            recorder = getattr(self, "_jdm_recorder", None)
+            if recorder is None:
+                from .jdm_log import get_recorder
+
+                recorder = self._jdm_recorder = get_recorder(
+                    self.hass.config.path("hass_dyson_jdm.jsonl")
+                )
+            recorder.record(self.serial_number, topic.split("/", 2)[-1], data)
+        except Exception as err:  # noqa: BLE001 — diagnostics must not break MQTT
+            _LOGGER.debug("jdm flight recorder failed: %s", err)
 
     def _store_jdm_service_response(self, method: str, data: dict[str, Any]) -> None:
         """Keep the latest jdm ``get_preference``/``get_map_list`` answer.
