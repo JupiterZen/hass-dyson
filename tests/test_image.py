@@ -1565,6 +1565,17 @@ class TestRenderLiveMapPng:
         raw = Image.open(io.BytesIO(png)).convert("RGB").tobytes()
         return Counter(zip(raw[0::3], raw[1::3], raw[2::3]))
 
+    @classmethod
+    def _near_count(cls, png: bytes, rgb: tuple, tol: int = 40) -> int:
+        """Pixels within ``tol`` of ``rgb`` per channel (the render is anti-aliased)."""
+        return sum(
+            n
+            for (r, g, b), n in cls._colour_counts(png).items()
+            if abs(r - rgb[0]) <= tol
+            and abs(g - rgb[1]) <= tol
+            and abs(b - rgb[2]) <= tol
+        )
+
     def _large_pending_zone(self) -> dict:
         """A +-5 m zone: a ~530 px canvas, so the renderer's small-canvas
         upscale factor is 1 and pixel counts reflect the real marker size."""
@@ -1593,9 +1604,8 @@ class TestRenderLiveMapPng:
             }
         )
         assert png is not None
-        counts = self._colour_counts(png)
-        assert counts[(240, 90, 200)] >= 70
-        assert counts[(255, 150, 0)] == 0
+        assert self._near_count(png, (240, 90, 200)) >= 70
+        assert self._near_count(png, (255, 150, 0), tol=25) <= 10  # no orange marker
 
     def test_dirt_marker_is_large_with_white_rim(self):
         png = _render_live_map_png(
@@ -1606,7 +1616,7 @@ class TestRenderLiveMapPng:
         )
         assert png is not None
         counts = self._colour_counts(png)
-        assert counts[(210, 165, 80)] >= 80
+        assert self._near_count(png, (40, 190, 95)) >= 80  # green dirt-removed disc
         assert counts[(255, 255, 255)] >= 50
         assert counts[(80, 200, 255)] == 0
 
@@ -1626,6 +1636,31 @@ class TestRenderLiveMapPng:
             if abs(r - 80) < 40 and abs(g - 200) < 40 and abs(b - 255) < 40
         )
         assert near_cyan >= 80
+
+    def test_liquid_dirt_is_drawn_differently_from_solid(self):
+        base = {"zones": [self._large_pending_zone()]}
+        solid = _render_live_map_png(
+            {**base, "dirt": [{"x": 0, "y": 0, "type": "solid"}]}
+        )
+        liquid = _render_live_map_png(
+            {**base, "dirt": [{"x": 0, "y": 0, "type": "liquid"}]}
+        )
+        assert solid != liquid
+        # Same green disc either way.
+        assert self._near_count(liquid, (40, 190, 95)) >= 80
+
+    def test_icon_glyph_offsets_cancel_the_map_orientation(self):
+        """Icons stay upright: flip + clockwise rotation undoes ``_upright``."""
+        import math
+
+        from custom_components.hass_dyson.image import _upright
+
+        for rot in (0, 90, 180, 270):
+            ux, uy = _upright(0.3, -0.55, rot)
+            fx, fy = ux, -uy  # _apply_orientation flips top-to-bottom first
+            c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+            rx, ry = fx * c - fy * s, fx * s + fy * c  # clockwise (y down)
+            assert (round(rx, 6), round(ry, 6)) == (0.3, -0.55)
 
     def test_unknown_dirt_type_falls_back(self):
         """An unrecognised dirt 'type' (future API value) still renders."""

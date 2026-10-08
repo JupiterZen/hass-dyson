@@ -1118,22 +1118,16 @@ _ZONE_STATUS_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
 }
 _ZONE_STATUS_FALLBACK_RGBA: tuple[int, int, int, int] = (60, 60, 62, 255)
 
-# Per-spot fill colour keyed by the ``dirt[].type`` value from the same
-# endpoint. Confirmed value (6 sep 2026 live probe, mid-clean): "solid".
-# Unknown/future values fall back to _DIRT_TYPE_FALLBACK_RGBA rather than
-# being skipped, same reasoning as _ZONE_STATUS_FALLBACK_RGBA above.
-# 15 sep 2026: lightened from the original dark-ochre-on-white set — that
-# colour nearly vanished against the new dark canvas, so it's now a bright
-# ochre/gold instead, still distinct from every zone/furniture hue.
-_DIRT_TYPE_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
-    "solid": (
-        210,
-        165,
-        80,
-        255,
-    ),  # bright ochre — distinct from every zone/furniture hue
-}
-_DIRT_TYPE_FALLBACK_RGBA: tuple[int, int, int, int] = (210, 165, 80, 255)
+# Detection icons, modelled on the MyDyson app's legend ("Uitleg over de
+# pictogrammen"): a green disc with dust dots = dirt removed (``dirt[].type``
+# "solid", the only other value seen is "liquid" = stain removed, drawn as a
+# splat), an orange disc with a cone = obstacle, pink with a paw = pet. Unknown
+# dirt types fall back to the dust icon rather than being skipped.
+_ICON_RIM_RGBA = (255, 255, 255, 255)
+_ICON_DIRT_RGBA = (40, 190, 95, 255)
+_ICON_OBSTACLE_RGBA = (255, 150, 0, 255)
+_ICON_PET_RGBA = (240, 90, 200, 255)
+_ICON_GLYPH_RGBA = (20, 35, 25, 255)
 
 
 # Supersampling for the vector-drawn maps: everything is drawn on a canvas
@@ -1191,6 +1185,98 @@ class _ScaledDraw:
             fill=fill,
             outline=outline,
             width=max(1, round(width * self._scale)),
+        )
+
+
+def _upright(dx: float, dy: float, rot: float) -> tuple[float, float]:
+    """Offset ``(dx, dy)`` pre-transformed against ``_apply_orientation``.
+
+    The finished image is flipped top-to-bottom and then rotated clockwise by
+    ``rot`` degrees, so glyph offsets are drawn counter-rotated and flipped:
+    that keeps the icons upright whatever the robot's map orientation is.
+    """
+    c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    return dx * c + dy * s, -(-dx * s + dy * c)
+
+
+def _draw_dirt_icon(
+    draw, x: float, y: float, liquid: bool, uv: bool, rot: float = 0.0
+) -> None:
+    """Green disc with dust dots (solid) or a splat (liquid), cyan ring if UV."""
+    r = 7.0
+    draw.ellipse(
+        [x - r, y - r, x + r, y + r],
+        fill=_ICON_DIRT_RGBA,
+        outline=_ICON_RIM_RGBA,
+        width=1.5,
+    )
+    if liquid:
+        for k in range(8):
+            ang = k * math.pi / 4
+            x1, y1 = _upright(0.15 * r * math.cos(ang), 0.15 * r * math.sin(ang), rot)
+            x2, y2 = _upright(0.62 * r * math.cos(ang), 0.62 * r * math.sin(ang), rot)
+            draw.line(
+                [x + x1, y + y1, x + x2, y + y2], fill=_ICON_GLYPH_RGBA, width=1.1
+            )
+        draw.ellipse(
+            [x - 0.2 * r, y - 0.2 * r, x + 0.2 * r, y + 0.2 * r],
+            fill=_ICON_GLYPH_RGBA,
+        )
+    else:
+        for dx, dy in (
+            (0.0, 0.0),
+            (-0.36, -0.22),
+            (0.34, -0.3),
+            (-0.22, 0.36),
+            (0.36, 0.22),
+            (0.0, -0.58),
+            (0.0, 0.58),
+            (-0.58, 0.0),
+            (0.58, 0.0),
+        ):
+            ox, oy = _upright(dx * r, dy * r, rot)
+            cx, cy, rr = x + ox, y + oy, 0.11 * r
+            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=_ICON_GLYPH_RGBA)
+    if uv:
+        # Outer cyan ring — distinguishes UV-scan spots.
+        draw.ellipse(
+            [x - 10, y - 10, x + 10, y + 10], outline=(80, 200, 255, 255), width=2
+        )
+
+
+def _draw_obstacle_icon(draw, x: float, y: float, pet: bool, rot: float = 0.0) -> None:
+    """Orange disc with a traffic cone (pet: pink disc with a paw)."""
+    r = 9.0
+    draw.ellipse(
+        [x - r, y - r, x + r, y + r],
+        fill=_ICON_PET_RGBA if pet else _ICON_OBSTACLE_RGBA,
+        outline=_ICON_RIM_RGBA,
+        width=1.5,
+    )
+
+    def pt(dx: float, dy: float) -> tuple[float, float]:
+        ox, oy = _upright(dx * r, dy * r, rot)
+        return x + ox, y + oy
+
+    if pet:
+        draw.polygon(
+            [
+                pt(-0.42 * math.cos(a), 0.2 + 0.42 * math.sin(a))
+                for a in [i * math.pi / 8 for i in range(16)]
+            ],
+            fill=_ICON_GLYPH_RGBA,
+        )
+        for dx, dy in ((-0.5, -0.1), (0.0, -0.45), (0.5, -0.1)):
+            cx, cy = pt(dx, dy)
+            rr = 0.17 * r
+            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=_ICON_GLYPH_RGBA)
+    else:
+        draw.polygon(
+            [pt(0, -0.55), pt(-0.38, 0.35), pt(0.38, 0.35)], fill=_ICON_GLYPH_RGBA
+        )
+        draw.polygon(
+            [pt(-0.58, 0.35), pt(0.58, 0.35), pt(0.58, 0.55), pt(-0.58, 0.55)],
+            fill=_ICON_GLYPH_RGBA,
         )
 
 
@@ -1426,55 +1512,35 @@ def _render_live_map_png(
             if len(poly) >= 3:
                 draw.polygon(poly, outline=(200, 40, 40, 255))
 
-        # Dirt spots — small filled circles, drawn before obstacles so an
-        # obstacle marker on top always stays visible if the two overlap.
+        # Dirt spots — app-style icons, drawn before obstacles so an obstacle
+        # icon on top always stays visible if the two overlap.
         for item in dirt:
             if not isinstance(item, dict) or item.get("x") is None:
                 continue
             dx, dy = _world_to_px(float(item["x"]), float(item["y"]))
-            fill = _DIRT_TYPE_FILL_RGBA.get(item.get("type"), _DIRT_TYPE_FALLBACK_RGBA)
-            # 1 Oct 2026: radius 4 -> 7 plus a white rim. A run typically has
-            # only one or two spots, and the old small ochre dot vanished
-            # against the amber CLEAN_PENDING zone fill (95, 80, 35).
-            draw.ellipse(
-                [dx - 7, dy - 7, dx + 7, dy + 7],
-                fill=fill,
-                outline=(255, 255, 255, 255),
-                width=2,
+            _draw_dirt_icon(
+                draw,
+                dx,
+                dy,
+                liquid=item.get("type") == "liquid",
+                uv=bool(item.get("isUvScanOn")),
+                rot=rotation_deg,
             )
-            if item.get("isUvScanOn"):
-                # Outer cyan ring — distinguishes UV-scan spots from the
-                # white rim every spot now has.
-                draw.ellipse(
-                    [dx - 10, dy - 10, dx + 10, dy + 10],
-                    outline=(80, 200, 255, 255),
-                    width=2,
-                )
 
-        # Obstacles — upward-pointing triangle, echoing the cone icon the
-        # MyDyson app uses for the same data. 1 Oct 2026: radius 5 -> 9 with
-        # a white rim, same reasoning as the dirt spots above.
+        # Obstacles — cone icon like the MyDyson app; pets (type "pet",
+        # 4 okt 2026) get a pink paw so they stand apart.
         for item in obstacles:
             if not isinstance(item, dict) or item.get("x") is None:
                 continue
             ox, oy = _world_to_px(float(item["x"]), float(item["y"]))
-            r = 9
-            # 4 okt 2026: pets (type "pet") get pink so they stand apart from
-            # ordinary obstacles; other/unknown types stay orange.
-            fill = (
-                (240, 90, 200, 255) if item.get("type") == "pet" else (255, 150, 0, 255)
-            )
-            draw.polygon(
-                [(ox, oy - r), (ox - r, oy + r), (ox + r, oy + r)],
-                fill=fill,
-                outline=(255, 255, 255, 255),
-                width=2,
+            _draw_obstacle_icon(
+                draw, ox, oy, pet=item.get("type") == "pet", rot=rotation_deg
             )
 
-        # Dock — green filled circle.
+        # Dock — green filled square (the green discs are dirt icons).
         if isinstance(dock, dict) and dock.get("x") is not None:
             dx, dy = _world_to_px(float(dock["x"]), float(dock["y"]))
-            draw.ellipse(
+            draw.rectangle(
                 [dx - 6, dy - 6, dx + 6, dy + 6],
                 fill=(0, 200, 80, 255),
                 outline=(0, 120, 40, 255),
