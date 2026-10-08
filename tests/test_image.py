@@ -1596,16 +1596,14 @@ class TestRenderLiveMapPng:
         assert counts[(255, 150, 0)] >= 70
         assert counts[(255, 255, 255)] >= 50
 
-    def test_pet_obstacle_is_pink_not_orange(self):
-        png = _render_live_map_png(
-            {
-                "zones": [self._large_pending_zone()],
-                "obstacles": [{"x": 0, "y": 0, "type": "pet"}],
-            }
+    def test_obstacle_type_does_not_change_the_icon(self):
+        """Obstacles carry only x/y in the cloud data; any ``type`` is ignored."""
+        base = {"zones": [self._large_pending_zone()]}
+        plain = _render_live_map_png({**base, "obstacles": [{"x": 0, "y": 0}]})
+        typed = _render_live_map_png(
+            {**base, "obstacles": [{"x": 0, "y": 0, "type": "pet"}]}
         )
-        assert png is not None
-        assert self._near_count(png, (240, 90, 200)) >= 70
-        assert self._near_count(png, (255, 150, 0), tol=25) <= 10  # no orange marker
+        assert plain == typed
 
     def test_dirt_marker_is_large_with_white_rim(self):
         png = _render_live_map_png(

@@ -1121,12 +1121,13 @@ _ZONE_STATUS_FALLBACK_RGBA: tuple[int, int, int, int] = (60, 60, 62, 255)
 # Detection icons, modelled on the MyDyson app's legend ("Uitleg over de
 # pictogrammen"): a green disc with dust dots = dirt removed (``dirt[].type``
 # "solid", the only other value seen is "liquid" = stain removed, drawn as a
-# splat), an orange disc with a cone = obstacle, pink with a paw = pet. Unknown
-# dirt types fall back to the dust icon rather than being skipped.
+# splat), an orange disc with a cone = obstacle. Obstacles carry only ``x``/``y``
+# in the cloud data (checked 8 okt 2026: 18 in 7 clean records, 6 live), so
+# there is no pet/object distinction to draw. Unknown dirt types fall back to
+# the dust icon rather than being skipped.
 _ICON_RIM_RGBA = (255, 255, 255, 255)
 _ICON_DIRT_RGBA = (40, 190, 95, 255)
 _ICON_OBSTACLE_RGBA = (255, 150, 0, 255)
-_ICON_PET_RGBA = (240, 90, 200, 255)
 _ICON_GLYPH_RGBA = (20, 35, 25, 255)
 
 
@@ -1244,12 +1245,12 @@ def _draw_dirt_icon(
         )
 
 
-def _draw_obstacle_icon(draw, x: float, y: float, pet: bool, rot: float = 0.0) -> None:
-    """Orange disc with a traffic cone (pet: pink disc with a paw)."""
+def _draw_obstacle_icon(draw, x: float, y: float, rot: float = 0.0) -> None:
+    """Orange disc with a traffic cone, like the MyDyson app."""
     r = 9.0
     draw.ellipse(
         [x - r, y - r, x + r, y + r],
-        fill=_ICON_PET_RGBA if pet else _ICON_OBSTACLE_RGBA,
+        fill=_ICON_OBSTACLE_RGBA,
         outline=_ICON_RIM_RGBA,
         width=1.5,
     )
@@ -1258,26 +1259,11 @@ def _draw_obstacle_icon(draw, x: float, y: float, pet: bool, rot: float = 0.0) -
         ox, oy = _upright(dx * r, dy * r, rot)
         return x + ox, y + oy
 
-    if pet:
-        draw.polygon(
-            [
-                pt(-0.42 * math.cos(a), 0.2 + 0.42 * math.sin(a))
-                for a in [i * math.pi / 8 for i in range(16)]
-            ],
-            fill=_ICON_GLYPH_RGBA,
-        )
-        for dx, dy in ((-0.5, -0.1), (0.0, -0.45), (0.5, -0.1)):
-            cx, cy = pt(dx, dy)
-            rr = 0.17 * r
-            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=_ICON_GLYPH_RGBA)
-    else:
-        draw.polygon(
-            [pt(0, -0.55), pt(-0.38, 0.35), pt(0.38, 0.35)], fill=_ICON_GLYPH_RGBA
-        )
-        draw.polygon(
-            [pt(-0.58, 0.35), pt(0.58, 0.35), pt(0.58, 0.55), pt(-0.58, 0.55)],
-            fill=_ICON_GLYPH_RGBA,
-        )
+    draw.polygon([pt(0, -0.55), pt(-0.38, 0.35), pt(0.38, 0.35)], fill=_ICON_GLYPH_RGBA)
+    draw.polygon(
+        [pt(-0.58, 0.35), pt(0.58, 0.35), pt(0.58, 0.55), pt(-0.58, 0.55)],
+        fill=_ICON_GLYPH_RGBA,
+    )
 
 
 def _render_live_map_png(
@@ -1527,15 +1513,12 @@ def _render_live_map_png(
                 rot=rotation_deg,
             )
 
-        # Obstacles — cone icon like the MyDyson app; pets (type "pet",
-        # 4 okt 2026) get a pink paw so they stand apart.
+        # Obstacles — cone icon like the MyDyson app.
         for item in obstacles:
             if not isinstance(item, dict) or item.get("x") is None:
                 continue
             ox, oy = _world_to_px(float(item["x"]), float(item["y"]))
-            _draw_obstacle_icon(
-                draw, ox, oy, pet=item.get("type") == "pet", rot=rotation_deg
-            )
+            _draw_obstacle_icon(draw, ox, oy, rot=rotation_deg)
 
         # Dock — green filled square (the green discs are dirt icons).
         if isinstance(dock, dict) and dock.get("x") is not None:
