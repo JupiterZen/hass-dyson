@@ -14,6 +14,7 @@ import pytest
 from custom_components.hass_dyson.select import (
     DysonRobotZoneCleaningStrategySelect,
     DysonRobotZoneCleanTypeSelect,
+    DysonRobotZoneMopPassesSelect,
     _async_setup_zone_settings_selects,
     _ha_device_id_for_serial,
 )
@@ -241,7 +242,7 @@ class TestSetupZoneSettingsSelects:
         add_entities.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_discovers_two_selects_per_zone(self):
+    async def test_discovers_three_selects_per_zone(self):
         coordinator = _make_coordinator()
         add_entities = MagicMock()
         zones = [_zone("13", "Gang"), _zone("10", "Woonkamer")]
@@ -254,8 +255,49 @@ class TestSetupZoneSettingsSelects:
             )
         add_entities.assert_called_once()
         added = add_entities.call_args.args[0]
-        assert len(added) == 4  # 2 zones × (clean-type + strategy)
+        assert len(added) == 6  # 2 zones × (clean-type + strategy + mop passes)
         assert sum(isinstance(e, DysonRobotZoneCleanTypeSelect) for e in added) == 2
         assert (
             sum(isinstance(e, DysonRobotZoneCleaningStrategySelect) for e in added) == 2
         )
+        assert sum(isinstance(e, DysonRobotZoneMopPassesSelect) for e in added) == 2
+
+
+class TestZoneMopPassesSelect:
+    def test_decodes_one_and_two(self):
+        one = DysonRobotZoneMopPassesSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", mopPasses=1)
+        )
+        two = DysonRobotZoneMopPassesSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", mopPasses=2)
+        )
+        assert one._attr_current_option == "1x dweilen"
+        assert two._attr_current_option == "2x dweilen"
+        assert one._attr_name == "Gang aantal keer dweilen"
+
+    def test_unknown_value_is_none(self):
+        entity = DysonRobotZoneMopPassesSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", mopPasses=3)
+        )
+        assert entity._attr_current_option is None
+
+    @pytest.mark.asyncio
+    async def test_select_calls_set_zone_behaviour(self):
+        entity = DysonRobotZoneMopPassesSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", mopPasses=1)
+        )
+        entity.hass = MagicMock()
+        entity.hass.services.async_call = AsyncMock()
+        entity.async_write_ha_state = MagicMock()
+        with patch(
+            "custom_components.hass_dyson.select._ha_device_id_for_serial",
+            return_value="dev1",
+        ):
+            await entity.async_select_option("2x dweilen")
+        entity.hass.services.async_call.assert_awaited_once_with(
+            "hass_dyson",
+            "set_zone_behaviour",
+            {"device_id": "dev1", "zone": "13", "map": MAP_ID, "mop_passes": 2},
+            blocking=True,
+        )
+        assert entity._attr_current_option == "2x dweilen"

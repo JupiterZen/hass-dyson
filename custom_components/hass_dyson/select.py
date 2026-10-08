@@ -48,6 +48,8 @@ _ZONE_CLEAN_TYPE_OPTIONS: dict[str, tuple[str, str | None]] = {
     "Stofzuigen + dweilen (hoog water)": ("vacuumAndMop", "high"),
 }
 _ZONE_CLEANING_STRATEGY_OPTIONS = ("auto", "quick", "quiet", "boost")
+# The app's "1x of 2x dweilen"; ``mopPasses`` 1 and 2 are the only values seen.
+_ZONE_MOP_PASSES_OPTIONS: dict[str, int] = {"1x dweilen": 1, "2x dweilen": 2}
 
 
 async def async_setup_entry(
@@ -175,7 +177,12 @@ async def _async_setup_zone_settings_selects(
     from .services import _fetch_zone_settings_for_current_map
 
     known_selects: dict[
-        str, tuple[DysonRobotZoneCleanTypeSelect, DysonRobotZoneCleaningStrategySelect]
+        str,
+        tuple[
+            DysonRobotZoneCleanTypeSelect,
+            DysonRobotZoneCleaningStrategySelect,
+            DysonRobotZoneMopPassesSelect,
+        ],
     ] = {}
 
     async def _async_discover() -> None:
@@ -203,13 +210,20 @@ async def _async_setup_zone_settings_selects(
                 strategy_select = DysonRobotZoneCleaningStrategySelect(
                     coordinator, map_id, zone
                 )
+                mop_passes_select = DysonRobotZoneMopPassesSelect(
+                    coordinator, map_id, zone
+                )
             except Exception:  # noqa: BLE001 — one bad zone shouldn't block the rest
                 _LOGGER.exception(
                     "Zone-settings select construction failed for zone %r", zone_id
                 )
                 continue
-            known_selects[zone_id] = (clean_type_select, strategy_select)
-            new_entities.extend([clean_type_select, strategy_select])
+            known_selects[zone_id] = (
+                clean_type_select,
+                strategy_select,
+                mop_passes_select,
+            )
+            new_entities.extend([clean_type_select, strategy_select, mop_passes_select])
 
         # A zone no longer on the current map — retire its selects. Same
         # reasoning as the target switches: no command history worth
@@ -1881,3 +1895,76 @@ class DysonTiltOscillationModeSelect(DysonEntity, SelectEntity):
         attributes["tilt_angle_control"] = anct
 
         return attributes
+
+
+class DysonRobotZoneMopPassesSelect(DysonEntity, SelectEntity):
+    """Per-zone mop-passes select (1x / 2x dweilen).
+
+    Same cloud-write/refresh pattern as DysonRobotZoneCleanTypeSelect; the
+    setting is ``mopPasses`` (1 or 2, the only values seen on the wire) in
+    the zone's persistent-map-metadata settings, shown in the app as
+    "1x of 2x dweilen". On the robot's own ``get_preference`` rows it is
+    ``mopPasses - 1`` (see DysonRobotRoomPreferencesSensor).
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        coordinator: DysonDataUpdateCoordinator,
+        map_id: str,
+        zone: dict,
+    ) -> None:
+        """Initialize the zone mop-passes select."""
+        super().__init__(coordinator)
+        self._zone_id: str = zone["id"]
+        self._map_id = map_id
+        self._attr_unique_id = (
+            f"{coordinator.serial_number}_zone_mop_passes_{map_id}_{self._zone_id}"
+        )
+        self._attr_options = list(_ZONE_MOP_PASSES_OPTIONS)
+        self._attr_icon = "mdi:repeat"
+        self.async_update_zone(zone)
+
+    @callback
+    def async_update_zone(self, zone: dict) -> None:
+        """Refresh state from freshly-fetched zone settings."""
+        self.zone_name: str = str(zone.get("name") or f"Zone {self._zone_id}")
+        self._attr_name = f"{self.zone_name} aantal keer dweilen"
+        passes = (zone.get("settings") or {}).get("mopPasses")
+        self._attr_current_option = next(
+            (label for label, n in _ZONE_MOP_PASSES_OPTIONS.items() if n == passes),
+            None,
+        )
+        if self.hass is not None and self.entity_id is not None:
+            self.async_write_ha_state()
+
+    async def async_select_option(self, option: str) -> None:
+        """Apply the chosen number of passes via set_zone_behaviour."""
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                "set_zone_behaviour",
+                {
+                    "device_id": _ha_device_id_for_serial(
+                        self.hass, self.coordinator.serial_number
+                    ),
+                    "zone": self._zone_id,
+                    "map": self._map_id,
+                    "mop_passes": _ZONE_MOP_PASSES_OPTIONS[option],
+                },
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to set zone %s (%s) mop passes to %r for %s: %s",
+                self._zone_id,
+                self.zone_name,
+                option,
+                mask_serial(self.coordinator.serial_number),
+                err,
+            )
+            return
+        self._attr_current_option = option
+        self.async_write_ha_state()
