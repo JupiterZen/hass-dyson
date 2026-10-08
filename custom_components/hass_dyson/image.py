@@ -1355,9 +1355,12 @@ def _render_live_map_png(
                 base = _ZONE_STATUS_FILL_RGBA.get(
                     zone.get("cleanStatus"), _ZONE_STATUS_FALLBACK_RGBA
                 )
+                # Rooms outside this run get a subtler tint so the active ones
+                # stand out (``visited`` belongs to the map, not to this run).
+                mix = 0.08 if zone.get("cleanStatus") == "CLEAN_NOT_REQUESTED" else 0.3
                 draw.polygon(
                     poly,
-                    fill=tuple(int(c + (255 - c) * 0.3) for c in base[:3]) + (255,),
+                    fill=tuple(int(c + (255 - c) * mix) for c in base[:3]) + (255,),
                 )
 
         # Zone outlines (same wall/room-separator distinction as the v2 renderer).

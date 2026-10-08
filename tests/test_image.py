@@ -1835,6 +1835,21 @@ class TestRenderLiveMapPng:
         lightened = tuple(int(c + (255 - c) * 0.3) for c in base)
         assert counts[lightened] >= 1000
 
+    def test_visited_fill_is_subtler_for_rooms_not_in_this_run(self):
+        zone = self._make_zone(status="CLEAN_NOT_REQUESTED")
+        zone["visited"] = [
+            {"x": -1.0, "y": -1.0},
+            {"x": 1.0, "y": -1.0},
+            {"x": 1.0, "y": 1.0},
+            {"x": -1.0, "y": 1.0},
+        ]
+        png = _render_live_map_png({"zones": [zone]})
+        assert png is not None
+        counts = self._colour_counts(png)
+        base = (60, 60, 62)  # CLEAN_NOT_REQUESTED
+        subtle = tuple(int(c + (255 - c) * 0.08) for c in base)
+        assert counts[subtle] >= 1000
+
     def test_visited_extends_bounding_box(self):
         """visited points outside the zone outline still fit on canvas."""
         zone = self._make_zone()
