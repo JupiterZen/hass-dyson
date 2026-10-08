@@ -43,3 +43,9 @@ def test_unknown_code_falls_back(code):
     sensor = _sensor([{"faultCode": code, "nextActionRequired": "USER_CONTINUE"}])
     assert sensor.native_value == f"Onbekende melding (code {code})"
     assert sensor.extra_state_attributes["actie_nodig"] is True
+
+
+def test_unknown_informational_code_is_not_alarming():
+    sensor = _sensor([{"faultCode": "2103", "nextActionRequired": "LOG_ONLY"}])
+    assert sensor.native_value == "Informatief (code 2103)"
+    assert sensor.extra_state_attributes["actie_nodig"] is False

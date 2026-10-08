@@ -3712,8 +3712,15 @@ class DysonRobotMessageSensor(DysonEntity, SensorEntity):
                 self._attr_extra_state_attributes = {"actie_nodig": False}
             else:
                 code = str(primary["faultCode"])
+                informational = primary.get("nextActionRequired") == "LOG_ONLY"
                 message, hint = _ROBOT_FAULT_MESSAGES_NL.get(
-                    code, (f"Onbekende melding (code {code})", "")
+                    code,
+                    (
+                        f"Informatief (code {code})"
+                        if informational
+                        else f"Onbekende melding (code {code})",
+                        "",
+                    ),
                 )
                 self._attr_native_value = message
                 self._attr_extra_state_attributes = {
