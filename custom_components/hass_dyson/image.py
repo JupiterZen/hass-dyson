@@ -1136,6 +1136,64 @@ _DIRT_TYPE_FILL_RGBA: dict[str, tuple[int, int, int, int]] = {
 _DIRT_TYPE_FALLBACK_RGBA: tuple[int, int, int, int] = (210, 165, 80, 255)
 
 
+# Supersampling for the vector-drawn maps: everything is drawn on a canvas
+# _SUPERSAMPLE times larger and shrunk to _OUTPUT_SCALE times the native
+# (2 cm) grid, which anti-aliases lines and markers instead of the blocky
+# single-pixel look of drawing straight onto the 2 cm grid.
+_SUPERSAMPLE = 4
+_OUTPUT_SCALE = 2
+
+
+class _ScaledDraw:
+    """ImageDraw wrapper that takes native-grid coordinates and widths."""
+
+    def __init__(self, img, scale: int) -> None:
+        from PIL import ImageDraw
+
+        self._draw = ImageDraw.Draw(img, "RGBA")
+        self._scale = scale
+
+    def _xy(self, xy):
+        s = self._scale
+        if xy and isinstance(xy[0], (tuple, list)):
+            return [(x * s, y * s) for x, y in xy]
+        return [v * s for v in xy]
+
+    def line(self, xy, fill=None, width=1):
+        pts = self._xy(xy)
+        w = max(1, round(width * self._scale))
+        self._draw.line(pts, fill=fill, width=w)
+        if w > 2 and isinstance(pts[0], tuple) is False and len(pts) == 4:
+            # Round caps: thick short segments otherwise leave gaps at bends.
+            r = w / 2
+            for x, y in ((pts[0], pts[1]), (pts[2], pts[3])):
+                self._draw.ellipse([x - r, y - r, x + r, y + r], fill=fill)
+
+    def polygon(self, xy, fill=None, outline=None, width=1):
+        self._draw.polygon(
+            self._xy(xy),
+            fill=fill,
+            outline=outline,
+            width=max(1, round(width * self._scale)),
+        )
+
+    def ellipse(self, xy, fill=None, outline=None, width=1):
+        self._draw.ellipse(
+            self._xy(xy),
+            fill=fill,
+            outline=outline,
+            width=max(1, round(width * self._scale)),
+        )
+
+    def rectangle(self, xy, fill=None, outline=None, width=1):
+        self._draw.rectangle(
+            self._xy(xy),
+            fill=fill,
+            outline=outline,
+            width=max(1, round(width * self._scale)),
+        )
+
+
 def _render_live_map_png(
     data: dict,
     rotation_deg: int = 0,
@@ -1178,7 +1236,7 @@ def _render_live_map_png(
     isUvScanOn}``).
     """
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image
     except ImportError:
         _LOGGER.warning("Pillow not available — cannot render live map PNG")
         return None
@@ -1252,13 +1310,15 @@ def _render_live_map_png(
         height = max(1, int((max_y - min_y + 2 * margin_m) / resolution))
 
         # Dark background — see _CANVAS_BG_RGBA docstring note.
-        img = Image.new("RGBA", (width, height), _CANVAS_BG_RGBA)
-        draw = ImageDraw.Draw(img, "RGBA")
+        img = Image.new(
+            "RGBA", (width * _SUPERSAMPLE, height * _SUPERSAMPLE), _CANVAS_BG_RGBA
+        )
+        draw = _ScaledDraw(img, _SUPERSAMPLE)
 
-        def _world_to_px(wx: float, wy: float) -> tuple[int, int]:
-            px = int((wx - offset_x) / resolution)
-            py = int((wy - offset_y) / resolution)
-            return (max(0, min(width - 1, px)), max(0, min(height - 1, py)))
+        def _world_to_px(wx: float, wy: float) -> tuple[float, float]:
+            px = (wx - offset_x) / resolution
+            py = (wy - offset_y) / resolution
+            return (max(0.0, min(width - 1.0, px)), max(0.0, min(height - 1.0, py)))
 
         # Zone fills first (so outlines/furniture/robot draw on top).
         for zone in zones:
@@ -1275,24 +1335,29 @@ def _render_live_map_png(
                 fill = _ZONE_STATUS_FILL_RGBA.get(status, _ZONE_STATUS_FALLBACK_RGBA)
                 draw.polygon(poly, fill=fill)
 
-        # Actually-visited footprint per zone — a point cloud (not a closed
-        # polygon) tracing the robot's real coverage, e.g. hugging furniture
-        # or stopping short of an obstacle, unlike the straight-line
-        # ``presentation`` room boundary. Confirmed live (12 sep 2026): this
-        # is the same organic, non-rectangular shape the MyDyson app shows
-        # for a finished run. Drawn as a light overlay dot per point rather
-        # than a filled polygon — the raw points aren't ordered as a
-        # traceable outline, only dense enough (~2-5cm spacing) to read as
-        # one at this resolution.
+        # Actually-visited footprint per zone — the area the robot really
+        # reached, hugging furniture or stopping short of an obstacle, unlike
+        # the straight-line ``presentation`` room boundary. Confirmed live
+        # (8 okt 2026, all six rooms): ``visited`` is ONE closed contour in
+        # drawing order (~5 cm between points, 5-7 cm closing gap, no breaks),
+        # so it fills as a polygon — the MyDyson app shows it as a filled
+        # area. Opaque lightened status colour: ImageDraw on RGBA does not
+        # blend, so a translucent fill would erase the zone colour below.
         for zone in zones:
             if not isinstance(zone, dict):
                 continue
-            for pt in zone.get("visited") or []:
-                if not isinstance(pt, dict) or pt.get("x") is None:
-                    continue
-                vx, vy = _world_to_px(float(pt["x"]), float(pt["y"]))
-                draw.rectangle(
-                    [vx - 1, vy - 1, vx + 1, vy + 1], fill=(255, 255, 255, 55)
+            poly = [
+                _world_to_px(float(pt["x"]), float(pt["y"]))
+                for pt in zone.get("visited") or []
+                if isinstance(pt, dict) and pt.get("x") is not None
+            ]
+            if len(poly) >= 3:
+                base = _ZONE_STATUS_FILL_RGBA.get(
+                    zone.get("cleanStatus"), _ZONE_STATUS_FALLBACK_RGBA
+                )
+                draw.polygon(
+                    poly,
+                    fill=tuple(int(c + (255 - c) * 0.3) for c in base[:3]) + (255,),
                 )
 
         # Zone outlines (same wall/room-separator distinction as the v2 renderer).
@@ -1464,15 +1529,20 @@ def _render_live_map_png(
         _LOGGER.debug("Live map rendering failed: %s", err)
         return None
 
+    # ImageDraw on an RGBA canvas writes raw RGBA (no blending), so furniture,
+    # route and footprint pixels are semi-transparent in the PNG and look
+    # different on every backdrop. Flatten onto white (the look in the light
+    # HA dialog) so the map is the same everywhere.
+    img = Image.alpha_composite(
+        Image.new("RGBA", img.size, (255, 255, 255, 255)), img
+    ).convert("RGB")
+    # Keep the earlier guarantee that a tiny map still comes out ~800 px.
+    out_scale = max(_OUTPUT_SCALE, 800 // max(width, height, 1))
+    img = img.resize(
+        (width * out_scale, height * out_scale),
+        resample=Image.Resampling.LANCZOS,
+    )
     img = _apply_orientation(img, rotation_deg)
-
-    max_dim = max(img.size)
-    if max_dim < 800:
-        factor = max(1, 800 // max_dim)
-        img = img.resize(
-            (img.size[0] * factor, img.size[1] * factor),
-            resample=Image.Resampling.NEAREST,
-        )
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)

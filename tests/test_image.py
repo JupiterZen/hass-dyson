@@ -1618,7 +1618,14 @@ class TestRenderLiveMapPng:
             }
         )
         assert png is not None
-        assert self._colour_counts(png)[(80, 200, 255)] >= 80
+        # Anti-aliased now (4x supersampled), so count near-cyan pixels
+        # rather than exact (80, 200, 255) ones.
+        near_cyan = sum(
+            n
+            for (r, g, b), n in self._colour_counts(png).items()
+            if abs(r - 80) < 40 and abs(g - 200) < 40 and abs(b - 255) < 40
+        )
+        assert near_cyan >= 80
 
     def test_unknown_dirt_type_falls_back(self):
         """An unrecognised dirt 'type' (future API value) still renders."""
@@ -1802,9 +1809,31 @@ class TestRenderLiveMapPng:
         """The visited overlay visibly changes the render vs. zone alone."""
         zone_only = _render_live_map_png({"zones": [self._make_zone()]})
         zone = self._make_zone()
-        zone["visited"] = [{"x": 0.0, "y": 0.0}, {"x": 0.1, "y": 0.1}]
+        zone["visited"] = [
+            {"x": 0.0, "y": 0.0},
+            {"x": 0.3, "y": 0.0},
+            {"x": 0.3, "y": 0.3},
+            {"x": 0.0, "y": 0.3},
+        ]
         with_visited = _render_live_map_png({"zones": [zone]})
         assert zone_only != with_visited
+
+    def test_visited_contour_is_filled_as_area(self):
+        """8 okt 2026: ``visited`` is one closed contour; the app shows it as a
+        filled area, so the interior gets the lightened zone colour."""
+        zone = self._make_zone()
+        zone["visited"] = [
+            {"x": -1.0, "y": -1.0},
+            {"x": 1.0, "y": -1.0},
+            {"x": 1.0, "y": 1.0},
+            {"x": -1.0, "y": 1.0},
+        ]
+        png = _render_live_map_png({"zones": [zone]})
+        assert png is not None
+        counts = self._colour_counts(png)
+        base = (95, 80, 35)  # CLEAN_PENDING
+        lightened = tuple(int(c + (255 - c) * 0.3) for c in base)
+        assert counts[lightened] >= 1000
 
     def test_visited_extends_bounding_box(self):
         """visited points outside the zone outline still fit on canvas."""
