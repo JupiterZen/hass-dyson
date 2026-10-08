@@ -77,6 +77,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
+from . import day_status
 from .const import (
     _CO2_UNAVAILABLE_STATES,
     _PM_SENSOR_UNAVAILABLE_STATES,
@@ -1575,6 +1576,7 @@ async def async_setup_entry(  # noqa: C901
                 # them after an early vacuum.stop. Same cloud-auth gate —
                 # reads the same live-maps/cleaning endpoint.
                 entities.append(DysonRobotResumeSimulationSensor(coordinator))
+                entities.append(DysonRobotDayStatusSensor(coordinator))
 
         # Cloud-fetched purifier sensors (outdoor AQI, daily history,
         # MyDyson scheduled events). Only for ec-category devices (air
@@ -5306,6 +5308,147 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
             self._finalize_pending = False
 
 
+class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
+    """Which rooms are clean today, and in what order the rest should be done.
+
+    State: number of rooms completed today (04:00-based day). Attributes carry
+    the open rooms in cleaning order (oldest completion first, fixed tiebreak),
+    per-room details, and the bookkeeping that survives a restart. Fed from the
+    cloud clean records (per-zone ``cleanStatus``), so manual runs count and an
+    interrupted room does not. See ``day_status`` for the rules.
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    _REFRESH_SECONDS = 1800.0
+    _RETRY_SECONDS = 120.0
+    _MAX_RETRIES = 6
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_day_status"
+        self._attr_name = "Robot Dagstatus"
+        self._attr_icon = "mdi:calendar-check"
+        self._state: dict[str, Any] = day_status.new_state()
+        self._last_try: float | None = None
+        self._pending = True
+        self._retries = 0
+        self._last_ingest: str | None = None
+
+    @property
+    def should_poll(self) -> bool:
+        return True
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if not last or last.state in ("unknown", "unavailable"):
+            return
+        zones = last.attributes.get("zones_state")
+        processed = last.attributes.get("processed_ids")
+        if isinstance(zones, dict) and isinstance(processed, list):
+            self._state = {"zones": zones, "processed": [str(i) for i in processed]}
+        self._publish()
+
+    def _zone_names(self) -> list[str]:
+        names = list(_cloud_zone_names_for(self.coordinator).values())
+        if names:
+            return names
+        return list(self._state["zones"]) or list(day_status.TIEBREAK)
+
+    def _publish(self) -> None:
+        result = day_status.evaluate(self._state, dt_util.now(), self._zone_names())
+        self._attr_native_value = len(result["klaar"])
+        self._attr_extra_state_attributes = {
+            "dag": result["dag"],
+            "open": result["open"],
+            "klaar": result["klaar"],
+            "alles_klaar": result["alles_klaar"],
+            "cant_clean_vandaag": result["cant_clean_vandaag"],
+            "kamers": result["kamers"],
+            "laatst_bijgewerkt": self._last_ingest,
+            "zones_state": self._state["zones"],
+            "processed_ids": self._state["processed"],
+        }
+
+    async def async_update(self) -> None:
+        from .image import _fetch_v2_floor_plan_data
+
+        if _is_cleaning(self.coordinator):
+            # A run in progress is only final once it ends.
+            self._pending = True
+            self._retries = 0
+            self._publish()
+            return
+        now = time.monotonic()
+        due = (
+            self._last_try is None
+            or (self._pending and now - self._last_try >= self._RETRY_SECONDS)
+            or now - self._last_try >= self._REFRESH_SECONDS
+        )
+        if due:
+            self._last_try = now
+            _clean_maps_cache.expire(self.coordinator.serial_number)
+            cleans = await fetch_clean_maps(self.coordinator)
+            ingested = 0
+            for rec in sorted(
+                cleans or [], key=lambda r: getattr(r, "start_time_epoch", 0) or 0
+            ):
+                clean_id = getattr(rec, "clean_id", None)
+                if (
+                    not isinstance(clean_id, str)
+                    or clean_id in self._state["processed"]
+                ):
+                    continue
+                stamps = [
+                    t
+                    for t in (
+                        getattr(rec, "end_time_epoch", None),
+                        getattr(rec, "start_time_epoch", None),
+                    )
+                    if isinstance(t, (int, float))
+                ]
+                data = await _fetch_v2_floor_plan_data(self.coordinator, clean_id)
+                zones = data.get("zones") if isinstance(data, dict) else None
+                if not stamps or not isinstance(zones, list):
+                    continue
+                when = dt_util.as_local(dt_util.utc_from_timestamp(max(stamps)))
+                if day_status.ingest_record(self._state, clean_id, when, zones):
+                    ingested += 1
+            if ingested:
+                self._last_ingest = dt_util.now().isoformat()
+            self._retries += 1
+            if ingested or self._retries >= self._MAX_RETRIES:
+                self._pending = False
+                self._retries = 0
+        self._publish()
+
+
+def _cloud_zone_names_for(coordinator: DysonDataUpdateCoordinator) -> dict[str, str]:
+    """Zone id -> cloud name for the current map (empty when not cached)."""
+    try:
+        from .services import _persistent_map_cache
+
+        serial = coordinator.serial_number
+        maps = _persistent_map_cache.get(serial) or _persistent_map_cache.get_stale(
+            serial
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+    jdm = (coordinator.data or {}).get("jdm-properties", {})
+    map_id = jdm.get("map_id") or getattr(
+        coordinator.device, "robot_current_map_id", None
+    )
+    names: dict[str, str] = {}
+    for pmap in maps or []:
+        if map_id is not None and str(pmap.id) != str(map_id):
+            continue
+        for zone in pmap.zones:
+            if zone.id and zone.name:
+                names[str(zone.id)] = str(zone.name)
+    return names
+
+
 # jdm ``service.get_preference`` room rows are [zone_id, name, 10 ints]. Decoded
 # on 30 sep 2026 by before/after comparison: index 3 = cleanType, 4 = strategy,
 # 5 = water level; index 10 = order (confirmed against persistent-map-metadata
@@ -5374,33 +5517,8 @@ class DysonRobotRoomPreferencesSensor(DysonEntity, SensorEntity):
         return None
 
     def _cloud_zone_names(self) -> dict[str, str]:
-        """Zone id -> cloud name for the current map (empty when not cached).
-
-        The robot's own room table keeps the default English names ("Living
-        room1") after a split/rename in the app (seen 8 okt 2026), while the
-        cloud and every HA entity use the real name — so match on the zone id.
-        """
-        try:
-            from .services import _persistent_map_cache
-
-            serial = self.coordinator.serial_number
-            maps = _persistent_map_cache.get(serial) or _persistent_map_cache.get_stale(
-                serial
-            )
-        except Exception:  # noqa: BLE001
-            return {}
-        jdm = (self.coordinator.data or {}).get("jdm-properties", {})
-        map_id = jdm.get("map_id") or getattr(
-            self.coordinator.device, "robot_current_map_id", None
-        )
-        names: dict[str, str] = {}
-        for pmap in maps or []:
-            if map_id is not None and str(pmap.id) != str(map_id):
-                continue
-            for zone in pmap.zones:
-                if zone.id and zone.name:
-                    names[str(zone.id)] = str(zone.name)
-        return names
+        """Zone id -> cloud name (the robot keeps English defaults after a split)."""
+        return _cloud_zone_names_for(self.coordinator)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
