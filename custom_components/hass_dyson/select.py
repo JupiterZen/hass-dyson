@@ -50,7 +50,6 @@ _ZONE_CLEAN_TYPE_OPTIONS: dict[str, tuple[str, str | None]] = {
 _ZONE_CLEANING_STRATEGY_OPTIONS = ("auto", "quick", "quiet", "boost")
 # The app's "1x of 2x dweilen"; ``mopPasses`` 1 and 2 are the only values seen.
 _ZONE_MOP_PASSES_OPTIONS: dict[str, int] = {"1x dweilen": 1, "2x dweilen": 2}
-_ZONE_DRY_PASSES_OPTIONS: dict[str, int] = {"1x": 1, "2x": 2}
 _ZONE_UV_SCAN_OPTIONS: dict[str, bool] = {"aan": True, "uit": False}
 
 
@@ -184,7 +183,6 @@ async def _async_setup_zone_settings_selects(
             DysonRobotZoneCleanTypeSelect,
             DysonRobotZoneCleaningStrategySelect,
             DysonRobotZoneMopPassesSelect,
-            DysonRobotZoneDryPassesSelect,
             DysonRobotZoneUvScanSelect,
         ],
     ] = {}
@@ -217,9 +215,6 @@ async def _async_setup_zone_settings_selects(
                 mop_passes_select = DysonRobotZoneMopPassesSelect(
                     coordinator, map_id, zone
                 )
-                dry_passes_select = DysonRobotZoneDryPassesSelect(
-                    coordinator, map_id, zone
-                )
                 uv_scan_select = DysonRobotZoneUvScanSelect(coordinator, map_id, zone)
             except Exception:  # noqa: BLE001 — one bad zone shouldn't block the rest
                 _LOGGER.exception(
@@ -230,7 +225,6 @@ async def _async_setup_zone_settings_selects(
                 clean_type_select,
                 strategy_select,
                 mop_passes_select,
-                dry_passes_select,
                 uv_scan_select,
             )
             new_entities.extend(known_selects[zone_id])
@@ -2002,21 +1996,6 @@ class DysonRobotZoneMopPassesSelect(DysonRobotZoneSettingSelect):
     _service_field = "mop_passes"
     _options_map = _ZONE_MOP_PASSES_OPTIONS
     _attr_icon = "mdi:repeat"
-
-
-class DysonRobotZoneDryPassesSelect(DysonRobotZoneSettingSelect):
-    """Per-zone ``dryPasses`` select (1 or 2).
-
-    What the app calls this is not confirmed (the field name says "dry
-    passes", presumably the dry/vacuum rounds), hence the literal label.
-    """
-
-    _unique_key = "zone_dry_passes"
-    _name_suffix = "droge rondes"
-    _settings_key = "dryPasses"
-    _service_field = "dry_passes"
-    _options_map = _ZONE_DRY_PASSES_OPTIONS
-    _attr_icon = "mdi:repeat-once"
 
 
 class DysonRobotZoneUvScanSelect(DysonRobotZoneSettingSelect):

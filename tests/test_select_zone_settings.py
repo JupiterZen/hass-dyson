@@ -14,7 +14,6 @@ import pytest
 from custom_components.hass_dyson.select import (
     DysonRobotZoneCleaningStrategySelect,
     DysonRobotZoneCleanTypeSelect,
-    DysonRobotZoneDryPassesSelect,
     DysonRobotZoneMopPassesSelect,
     DysonRobotZoneUvScanSelect,
     _async_setup_zone_settings_selects,
@@ -244,7 +243,7 @@ class TestSetupZoneSettingsSelects:
         add_entities.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_discovers_five_selects_per_zone(self):
+    async def test_discovers_four_selects_per_zone(self):
         coordinator = _make_coordinator()
         add_entities = MagicMock()
         zones = [_zone("13", "Gang"), _zone("10", "Woonkamer")]
@@ -257,7 +256,7 @@ class TestSetupZoneSettingsSelects:
             )
         add_entities.assert_called_once()
         added = add_entities.call_args.args[0]
-        assert len(added) == 10  # 2 zones × 5 settings selects
+        assert len(added) == 8  # 2 zones × 4 settings selects
         assert sum(isinstance(e, DysonRobotZoneCleanTypeSelect) for e in added) == 2
         assert (
             sum(isinstance(e, DysonRobotZoneCleaningStrategySelect) for e in added) == 2
@@ -305,14 +304,7 @@ class TestZoneMopPassesSelect:
         assert entity._attr_current_option == "2x dweilen"
 
 
-class TestZoneDryPassesAndUvScanSelects:
-    def test_dry_passes_decode(self):
-        entity = DysonRobotZoneDryPassesSelect(
-            _make_coordinator(), MAP_ID, _zone("13", "Gang", dryPasses=2)
-        )
-        assert entity._attr_current_option == "2x"
-        assert entity._attr_name == "Gang droge rondes"
-
+class TestZoneUvScanSelect:
     def test_uv_scan_decodes_bool(self):
         on = DysonRobotZoneUvScanSelect(
             _make_coordinator(), MAP_ID, _zone("13", "Gang", isUvScanOn=True)
