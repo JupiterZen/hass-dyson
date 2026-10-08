@@ -1552,6 +1552,7 @@ async def async_setup_entry(  # noqa: C901
             # later. Created unconditionally for robot devices, same as
             # the voice-download sensor.
             entities.append(DysonRobotActiveFaultSensor(coordinator))
+            entities.append(DysonRobotMessageSensor(coordinator))
             entities.append(DysonRobotRoomPreferencesSensor(coordinator))
             if coordinator.config_entry.data.get("auth_token"):
                 entities.append(DysonRobotPlannedCleanEstimateSensor(coordinator))
@@ -3641,6 +3642,89 @@ class DysonRobotActiveFaultSensor(DysonEntity, SensorEntity):
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error updating robot active-fault sensor for device %s: %s",
+                self.coordinator.serial_number,
+                err,
+            )
+            self._attr_native_value = None
+            self._attr_extra_state_attributes = {}
+        super()._handle_coordinator_update()
+
+
+# Dutch message + what-to-do hint per robot faultCode, for the "Robot Melding"
+# sensor. Same confirmed codes as _ROBOT_FAULT_CODE_LABELS; informational codes
+# whose meaning is not confirmed say so instead of guessing.
+_ROBOT_FAULT_MESSAGES_NL: dict[str, tuple[str, str]] = {
+    "581": (
+        "Schoonwatertank leeg",
+        "Vul de schoonwatertank van het dock en druk op hervatten.",
+    ),
+    "570": (
+        "Borstelfout",
+        "Haal vastgeraakt materiaal (touw, draad) uit de borstel en hervat daarna.",
+    ),
+    "630": (
+        "Roterende dweilborstel zit vast",
+        "Haal vastgeraakt materiaal uit de dweilrol en hervat daarna.",
+    ),
+    "2007": (
+        "Doelgebied onbereikbaar",
+        "Haal obstakels weg die de weg blokkeren en hervat daarna.",
+    ),
+    "2012": (
+        "Kan gebied niet bereiken (op weg naar het dock)",
+        "Controleer of er iets de weg blokkeert.",
+    ),
+    "2510": (
+        "Robot is opgetild (tilsensor)",
+        "Zet de robot terug op de grond of het dock; verdwijnt vanzelf.",
+    ),
+    "2105": ("Dock is aan het drogen", ""),
+    "2108": ("Informatief (betekenis niet bevestigd)", ""),
+    "2109": ("Informatief (betekenis niet bevestigd)", ""),
+}
+
+
+class DysonRobotMessageSensor(DysonEntity, SensorEntity):
+    """Dutch, human-readable reason the robot is paused or reports a fault.
+
+    State is the message ("Geen" when no fault is active). Attributes carry
+    the hint, the code and ``actie_nodig`` (``nextActionRequired`` is
+    ``USER_CONTINUE``), so an automation can notify only when the user has to
+    act. Built from the same ``robot_active_faults`` as the Active Fault
+    sensor; unknown codes render as "Onbekende melding (code X)".
+    """
+
+    coordinator: DysonDataUpdateCoordinator
+
+    def __init__(self, coordinator: DysonDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_robot_message"
+        self._attr_name = "Robot Melding"
+        self._attr_icon = "mdi:message-alert-outline"
+
+    def _handle_coordinator_update(self) -> None:
+        device = self.coordinator.device
+        try:
+            faults = getattr(device, "robot_active_faults", None) if device else None
+            primary = faults[0] if isinstance(faults, list) and faults else None
+            if not isinstance(primary, dict) or primary.get("faultCode") is None:
+                self._attr_native_value = "Geen"
+                self._attr_extra_state_attributes = {"actie_nodig": False}
+            else:
+                code = str(primary["faultCode"])
+                message, hint = _ROBOT_FAULT_MESSAGES_NL.get(
+                    code, (f"Onbekende melding (code {code})", "")
+                )
+                self._attr_native_value = message
+                self._attr_extra_state_attributes = {
+                    "code": code,
+                    "wat_te_doen": hint,
+                    "actie_nodig": primary.get("nextActionRequired") == "USER_CONTINUE",
+                    "next_action_required": primary.get("nextActionRequired"),
+                }
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error updating robot message sensor for device %s: %s",
                 self.coordinator.serial_number,
                 err,
             )
