@@ -5606,12 +5606,27 @@ class DysonRobotPlannedCleanEstimateSensor(DysonEntity, SensorEntity):
         return self._extra
 
     def _selected_zone_names(self) -> list[str]:
+        """Rooms the next automatic clean would do.
+
+        Since 8 okt 2026 that is every room still open today according to the
+        day-status sensor (cleaning order); only when that sensor is not
+        available yet do the ``Target <room>`` switches decide, as before.
+        """
         from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(self.hass)
+        day_entity = registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{self.coordinator.serial_number}_day_status"
+        )
+        day_state = self.hass.states.get(day_entity) if day_entity else None
+        open_rooms = day_state.attributes.get("open") if day_state else None
+        if isinstance(open_rooms, list):
+            return [str(n) for n in open_rooms]
 
         prefix = f"{self.coordinator.serial_number}_zone_target_"
         names: list[str] = []
         for entry in er.async_entries_for_config_entry(
-            er.async_get(self.hass), self.coordinator.config_entry.entry_id
+            registry, self.coordinator.config_entry.entry_id
         ):
             if entry.domain != "switch" or not (entry.unique_id or "").startswith(
                 prefix

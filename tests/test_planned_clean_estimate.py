@@ -163,3 +163,43 @@ class TestSensor:
             await sensor.async_update()
         assert sensor.native_value is None
         post.assert_not_awaited()
+
+
+class TestSelectedZoneNames:
+    def _sensor(self):
+        coordinator = MagicMock()
+        coordinator.serial_number = "S"
+        sensor = DysonRobotPlannedCleanEstimateSensor(coordinator)
+        sensor.hass = MagicMock()
+        return sensor
+
+    def test_open_rooms_from_the_day_status_sensor_win(self):
+        sensor = self._sensor()
+        registry = MagicMock()
+        registry.async_get_entity_id.return_value = "sensor.x_dagstatus"
+        sensor.hass.states.get.return_value = MagicMock(
+            attributes={"open": ["Kinderkamer", "Zithoek"]}
+        )
+        with patch(
+            "homeassistant.helpers.entity_registry.async_get", return_value=registry
+        ):
+            assert sensor._selected_zone_names() == ["Kinderkamer", "Zithoek"]
+        registry.async_get_entity_id.assert_called_once_with(
+            "sensor", "hass_dyson", "S_day_status"
+        )
+
+    def test_falls_back_to_the_target_switches_without_a_day_status(self):
+        sensor = self._sensor()
+        registry = MagicMock()
+        registry.async_get_entity_id.return_value = None
+        with (
+            patch(
+                "homeassistant.helpers.entity_registry.async_get",
+                return_value=registry,
+            ),
+            patch(
+                "homeassistant.helpers.entity_registry.async_entries_for_config_entry",
+                return_value=[],
+            ),
+        ):
+            assert sensor._selected_zone_names() == []
