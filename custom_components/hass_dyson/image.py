@@ -1130,6 +1130,10 @@ _ICON_DIRT_RGBA = (40, 190, 95, 255)
 _ICON_OBSTACLE_RGBA = (255, 150, 0, 255)
 _ICON_GLYPH_RGBA = (20, 35, 25, 255)
 
+# Furniture: translucent fill (the footprint shows through), solid outline.
+_FURNITURE_FILL_RGBA = (210, 190, 165, 105)
+_FURNITURE_OUTLINE_RGBA = (160, 140, 115, 255)
+
 
 # Supersampling for the vector-drawn maps: everything is drawn on a canvas
 # _SUPERSAMPLE times larger and shrunk to _OUTPUT_SCALE times the native
@@ -1470,8 +1474,13 @@ def _render_live_map_png(
             if len(pts) > 1:
                 draw.line(pts, fill=(30, 144, 255, 200), width=2)
 
-        # Furniture silhouettes — light brown fill, no per-type styling (the
+        # Furniture silhouettes — light brown, no per-type styling (the
         # ``type`` field, e.g. "tvStand"/"doubleBed", is cosmetic only here).
+        # Translucent (8 okt 2026) so the footprint and the driven route stay
+        # visible underneath: ImageDraw does not blend, so the shapes go on
+        # their own transparent layer that is alpha-composited onto the map.
+        furniture_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        furniture_draw = _ScaledDraw(furniture_layer, _SUPERSAMPLE)
         for item in furniture:
             if not isinstance(item, dict):
                 continue
@@ -1481,9 +1490,10 @@ def _render_live_map_png(
                 if isinstance(pt, dict) and pt.get("x") is not None
             ]
             if len(poly) >= 3:
-                draw.polygon(
-                    poly, fill=(210, 190, 165, 200), outline=(160, 140, 115, 255)
+                furniture_draw.polygon(
+                    poly, fill=_FURNITURE_FILL_RGBA, outline=_FURNITURE_OUTLINE_RGBA
                 )
+        img.alpha_composite(furniture_layer)
 
         # No-go restriction zones — hatched-looking red outline (solid fill
         # would obscure the zone-status colour underneath, which matters more).

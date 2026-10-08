@@ -1883,6 +1883,33 @@ class TestRenderLiveMapPng:
         subtle = tuple(int(c + (255 - c) * 0.08) for c in base)
         assert counts[subtle] >= 1000
 
+    def test_furniture_is_translucent_over_the_footprint(self):
+        """8 okt 2026: what lies under a piece of furniture shows through."""
+        furniture = {
+            "type": "tvStand",
+            "points": [
+                {"x": -0.5, "y": -0.5},
+                {"x": 0.5, "y": -0.5},
+                {"x": 0.5, "y": 0.5},
+                {"x": -0.5, "y": 0.5},
+            ],
+        }
+        visited = [
+            {"x": -1.5, "y": -1.5},
+            {"x": 1.5, "y": -1.5},
+            {"x": 1.5, "y": 1.5},
+            {"x": -1.5, "y": 1.5},
+        ]
+        plain = self._make_zone()
+        with_footprint = self._make_zone()
+        with_footprint["visited"] = visited
+        a = _render_live_map_png({"zones": [plain], "furniture": [furniture]})
+        b = _render_live_map_png({"zones": [with_footprint], "furniture": [furniture]})
+        assert a is not None and b is not None
+        ia, ib = Image.open(io.BytesIO(a)), Image.open(io.BytesIO(b))
+        centre = (ia.size[0] // 2, ia.size[1] // 2)
+        assert ia.getpixel(centre) != ib.getpixel(centre)
+
     def test_visited_extends_bounding_box(self):
         """visited points outside the zone outline still fit on canvas."""
         zone = self._make_zone()
