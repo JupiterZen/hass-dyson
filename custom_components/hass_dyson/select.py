@@ -50,6 +50,8 @@ _ZONE_CLEAN_TYPE_OPTIONS: dict[str, tuple[str, str | None]] = {
 _ZONE_CLEANING_STRATEGY_OPTIONS = ("auto", "quick", "quiet", "boost")
 # The app's "1x of 2x dweilen"; ``mopPasses`` 1 and 2 are the only values seen.
 _ZONE_MOP_PASSES_OPTIONS: dict[str, int] = {"1x dweilen": 1, "2x dweilen": 2}
+_ZONE_DRY_PASSES_OPTIONS: dict[str, int] = {"1x": 1, "2x": 2}
+_ZONE_UV_SCAN_OPTIONS: dict[str, bool] = {"aan": True, "uit": False}
 
 
 async def async_setup_entry(
@@ -182,6 +184,8 @@ async def _async_setup_zone_settings_selects(
             DysonRobotZoneCleanTypeSelect,
             DysonRobotZoneCleaningStrategySelect,
             DysonRobotZoneMopPassesSelect,
+            DysonRobotZoneDryPassesSelect,
+            DysonRobotZoneUvScanSelect,
         ],
     ] = {}
 
@@ -213,6 +217,10 @@ async def _async_setup_zone_settings_selects(
                 mop_passes_select = DysonRobotZoneMopPassesSelect(
                     coordinator, map_id, zone
                 )
+                dry_passes_select = DysonRobotZoneDryPassesSelect(
+                    coordinator, map_id, zone
+                )
+                uv_scan_select = DysonRobotZoneUvScanSelect(coordinator, map_id, zone)
             except Exception:  # noqa: BLE001 — one bad zone shouldn't block the rest
                 _LOGGER.exception(
                     "Zone-settings select construction failed for zone %r", zone_id
@@ -222,8 +230,10 @@ async def _async_setup_zone_settings_selects(
                 clean_type_select,
                 strategy_select,
                 mop_passes_select,
+                dry_passes_select,
+                uv_scan_select,
             )
-            new_entities.extend([clean_type_select, strategy_select, mop_passes_select])
+            new_entities.extend(known_selects[zone_id])
 
         # A zone no longer on the current map — retire its selects. Same
         # reasoning as the target switches: no command history worth
@@ -1897,18 +1907,22 @@ class DysonTiltOscillationModeSelect(DysonEntity, SelectEntity):
         return attributes
 
 
-class DysonRobotZoneMopPassesSelect(DysonEntity, SelectEntity):
-    """Per-zone mop-passes select (1x / 2x dweilen).
+class DysonRobotZoneSettingSelect(DysonEntity, SelectEntity):
+    """Base for per-zone selects backed by one ``settings`` field.
 
-    Same cloud-write/refresh pattern as DysonRobotZoneCleanTypeSelect; the
-    setting is ``mopPasses`` (1 or 2, the only values seen on the wire) in
-    the zone's persistent-map-metadata settings, shown in the app as
-    "1x of 2x dweilen". On the robot's own ``get_preference`` rows it is
-    ``mopPasses - 1`` (see DysonRobotRoomPreferencesSensor).
+    Same cloud-write/refresh pattern as DysonRobotZoneCleanTypeSelect: reads
+    the field from the zone's persistent-map-metadata settings and writes it
+    via ``set_zone_behaviour``. Subclasses set the class attributes.
     """
 
     coordinator: DysonDataUpdateCoordinator
     _attr_entity_category = EntityCategory.CONFIG
+
+    _unique_key: str
+    _name_suffix: str
+    _settings_key: str  # key in the zone's ``settings`` dict
+    _service_field: str  # matching ``set_zone_behaviour`` field
+    _options_map: dict[str, Any]  # option label -> settings value
 
     def __init__(
         self,
@@ -1916,32 +1930,35 @@ class DysonRobotZoneMopPassesSelect(DysonEntity, SelectEntity):
         map_id: str,
         zone: dict,
     ) -> None:
-        """Initialize the zone mop-passes select."""
+        """Initialize the zone setting select."""
         super().__init__(coordinator)
         self._zone_id: str = zone["id"]
         self._map_id = map_id
         self._attr_unique_id = (
-            f"{coordinator.serial_number}_zone_mop_passes_{map_id}_{self._zone_id}"
+            f"{coordinator.serial_number}_{self._unique_key}_{map_id}_{self._zone_id}"
         )
-        self._attr_options = list(_ZONE_MOP_PASSES_OPTIONS)
-        self._attr_icon = "mdi:repeat"
+        self._attr_options = list(self._options_map)
         self.async_update_zone(zone)
 
     @callback
     def async_update_zone(self, zone: dict) -> None:
         """Refresh state from freshly-fetched zone settings."""
         self.zone_name: str = str(zone.get("name") or f"Zone {self._zone_id}")
-        self._attr_name = f"{self.zone_name} aantal keer dweilen"
-        passes = (zone.get("settings") or {}).get("mopPasses")
+        self._attr_name = f"{self.zone_name} {self._name_suffix}"
+        value = (zone.get("settings") or {}).get(self._settings_key)
         self._attr_current_option = next(
-            (label for label, n in _ZONE_MOP_PASSES_OPTIONS.items() if n == passes),
+            (
+                label
+                for label, v in self._options_map.items()
+                if v == value and type(v) is type(value)
+            ),
             None,
         )
         if self.hass is not None and self.entity_id is not None:
             self.async_write_ha_state()
 
     async def async_select_option(self, option: str) -> None:
-        """Apply the chosen number of passes via set_zone_behaviour."""
+        """Apply the chosen value via set_zone_behaviour."""
         try:
             await self.hass.services.async_call(
                 DOMAIN,
@@ -1952,15 +1969,16 @@ class DysonRobotZoneMopPassesSelect(DysonEntity, SelectEntity):
                     ),
                     "zone": self._zone_id,
                     "map": self._map_id,
-                    "mop_passes": _ZONE_MOP_PASSES_OPTIONS[option],
+                    self._service_field: self._options_map[option],
                 },
                 blocking=True,
             )
         except Exception as err:
             _LOGGER.error(
-                "Failed to set zone %s (%s) mop passes to %r for %s: %s",
+                "Failed to set zone %s (%s) %s to %r for %s: %s",
                 self._zone_id,
                 self.zone_name,
+                self._settings_key,
                 option,
                 mask_serial(self.coordinator.serial_number),
                 err,
@@ -1968,3 +1986,46 @@ class DysonRobotZoneMopPassesSelect(DysonEntity, SelectEntity):
             return
         self._attr_current_option = option
         self.async_write_ha_state()
+
+
+class DysonRobotZoneMopPassesSelect(DysonRobotZoneSettingSelect):
+    """Per-zone mop-passes select (1x / 2x dweilen).
+
+    ``mopPasses`` (1 or 2, the only values seen on the wire), shown in the
+    app as "1x of 2x dweilen". On the robot's own ``get_preference`` rows it
+    is ``mopPasses - 1`` (see DysonRobotRoomPreferencesSensor).
+    """
+
+    _unique_key = "zone_mop_passes"
+    _name_suffix = "aantal keer dweilen"
+    _settings_key = "mopPasses"
+    _service_field = "mop_passes"
+    _options_map = _ZONE_MOP_PASSES_OPTIONS
+    _attr_icon = "mdi:repeat"
+
+
+class DysonRobotZoneDryPassesSelect(DysonRobotZoneSettingSelect):
+    """Per-zone ``dryPasses`` select (1 or 2).
+
+    What the app calls this is not confirmed (the field name says "dry
+    passes", presumably the dry/vacuum rounds), hence the literal label.
+    """
+
+    _unique_key = "zone_dry_passes"
+    _name_suffix = "droge rondes"
+    _settings_key = "dryPasses"
+    _service_field = "dry_passes"
+    _options_map = _ZONE_DRY_PASSES_OPTIONS
+    _attr_icon = "mdi:repeat-once"
+
+
+class DysonRobotZoneUvScanSelect(DysonRobotZoneSettingSelect):
+    """Per-zone UV scan on/off (``isUvScanOn``) — a select rather than a
+    switch so it shares the zone-select discovery lifecycle."""
+
+    _unique_key = "zone_uv_scan"
+    _name_suffix = "UV-scan"
+    _settings_key = "isUvScanOn"
+    _service_field = "uv_scan"
+    _options_map = _ZONE_UV_SCAN_OPTIONS
+    _attr_icon = "mdi:lightbulb-on-outline"

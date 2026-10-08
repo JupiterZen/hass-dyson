@@ -14,7 +14,9 @@ import pytest
 from custom_components.hass_dyson.select import (
     DysonRobotZoneCleaningStrategySelect,
     DysonRobotZoneCleanTypeSelect,
+    DysonRobotZoneDryPassesSelect,
     DysonRobotZoneMopPassesSelect,
+    DysonRobotZoneUvScanSelect,
     _async_setup_zone_settings_selects,
     _ha_device_id_for_serial,
 )
@@ -242,7 +244,7 @@ class TestSetupZoneSettingsSelects:
         add_entities.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_discovers_three_selects_per_zone(self):
+    async def test_discovers_five_selects_per_zone(self):
         coordinator = _make_coordinator()
         add_entities = MagicMock()
         zones = [_zone("13", "Gang"), _zone("10", "Woonkamer")]
@@ -255,7 +257,7 @@ class TestSetupZoneSettingsSelects:
             )
         add_entities.assert_called_once()
         added = add_entities.call_args.args[0]
-        assert len(added) == 6  # 2 zones × (clean-type + strategy + mop passes)
+        assert len(added) == 10  # 2 zones × 5 settings selects
         assert sum(isinstance(e, DysonRobotZoneCleanTypeSelect) for e in added) == 2
         assert (
             sum(isinstance(e, DysonRobotZoneCleaningStrategySelect) for e in added) == 2
@@ -301,3 +303,48 @@ class TestZoneMopPassesSelect:
             blocking=True,
         )
         assert entity._attr_current_option == "2x dweilen"
+
+
+class TestZoneDryPassesAndUvScanSelects:
+    def test_dry_passes_decode(self):
+        entity = DysonRobotZoneDryPassesSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", dryPasses=2)
+        )
+        assert entity._attr_current_option == "2x"
+        assert entity._attr_name == "Gang droge rondes"
+
+    def test_uv_scan_decodes_bool(self):
+        on = DysonRobotZoneUvScanSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", isUvScanOn=True)
+        )
+        off = DysonRobotZoneUvScanSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", isUvScanOn=False)
+        )
+        assert on._attr_current_option == "aan"
+        assert off._attr_current_option == "uit"
+
+    def test_uv_scan_does_not_confuse_bool_with_int(self):
+        entity = DysonRobotZoneUvScanSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", isUvScanOn=1)
+        )
+        assert entity._attr_current_option is None
+
+    @pytest.mark.asyncio
+    async def test_uv_scan_writes_boolean(self):
+        entity = DysonRobotZoneUvScanSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang", isUvScanOn=True)
+        )
+        entity.hass = MagicMock()
+        entity.hass.services.async_call = AsyncMock()
+        entity.async_write_ha_state = MagicMock()
+        with patch(
+            "custom_components.hass_dyson.select._ha_device_id_for_serial",
+            return_value="dev1",
+        ):
+            await entity.async_select_option("uit")
+        entity.hass.services.async_call.assert_awaited_once_with(
+            "hass_dyson",
+            "set_zone_behaviour",
+            {"device_id": "dev1", "zone": "13", "map": MAP_ID, "uv_scan": False},
+            blocking=True,
+        )
