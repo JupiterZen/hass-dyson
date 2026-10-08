@@ -5373,12 +5373,42 @@ class DysonRobotRoomPreferencesSensor(DysonEntity, SensorEntity):
             return "aan" if value else "uit"
         return None
 
+    def _cloud_zone_names(self) -> dict[str, str]:
+        """Zone id -> cloud name for the current map (empty when not cached).
+
+        The robot's own room table keeps the default English names ("Living
+        room1") after a split/rename in the app (seen 8 okt 2026), while the
+        cloud and every HA entity use the real name — so match on the zone id.
+        """
+        try:
+            from .services import _persistent_map_cache
+
+            serial = self.coordinator.serial_number
+            maps = _persistent_map_cache.get(serial) or _persistent_map_cache.get_stale(
+                serial
+            )
+        except Exception:  # noqa: BLE001
+            return {}
+        jdm = (self.coordinator.data or {}).get("jdm-properties", {})
+        map_id = jdm.get("map_id") or getattr(
+            self.coordinator.device, "robot_current_map_id", None
+        )
+        names: dict[str, str] = {}
+        for pmap in maps or []:
+            if map_id is not None and str(pmap.id) != str(map_id):
+                continue
+            for zone in pmap.zones:
+                if zone.id and zone.name:
+                    names[str(zone.id)] = str(zone.name)
+        return names
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         pref = self._preference()
         if not pref:
             return {}
         data = pref["data"]
+        cloud_names = self._cloud_zone_names()
         rooms = []
         for row in data.get("room") or []:
             if not isinstance(row, list) or len(row) < 12:
@@ -5392,10 +5422,13 @@ class DysonRobotRoomPreferencesSensor(DysonEntity, SensorEntity):
                     name, room_type = parsed.get("name", name), parsed.get("type")
                 except ValueError:
                     pass
+            robot_name = name
+            name = cloud_names.get(str(row[0]), name)
             rooms.append(
                 {
                     "id": row[0],
                     "naam": name,
+                    "robot_naam": robot_name,
                     "type": room_type,
                     "cleanType": _pref_label(_PREF_CLEAN_TYPE, row[3]),
                     "strategie": _pref_label(_PREF_STRATEGY, row[4]),

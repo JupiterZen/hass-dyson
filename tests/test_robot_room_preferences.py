@@ -177,3 +177,47 @@ def test_water_level_99_is_very_low(sensor, coordinator):
         }
     )
     assert sensor.extra_state_attributes["kamers"][0]["water"] == "veryLow"
+
+
+def test_cloud_zone_names_replace_the_robots_english_defaults(sensor, coordinator):
+    """8 okt 2026: after a split the robot keeps "Living room1"/"Living room2"
+    while the cloud (and HA) name the zones Woonkamer/Zithoek: match on the id."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    rows = [
+        [10, "Living room1", 2, 1, 1, 1, 0, 0, 0, 0, 2, 0],
+        [16, "Living room2", 0, 1, 0, 0, 0, 0, 0, 0, 7, 0],
+        [11, "Slaapkamer", 2, 1, 0, 1, 0, 0, 0, 0, 1, 0],
+    ]
+    coordinator._handle_jdm_status_message(
+        {
+            "code": 0,
+            "method": "service.get_preference",
+            "data": {"room": rows, "prefer_on": 1},
+        }
+    )
+    zone = lambda i, n: SimpleNamespace(id=i, name=n)  # noqa: E731
+    cache = MagicMock()
+    cache.get.return_value = [
+        SimpleNamespace(
+            id="1790712695",
+            zones=[
+                zone("10", "Woonkamer"),
+                zone("16", "Zithoek"),
+                zone("11", "Slaapkamer"),
+            ],
+        )
+    ]
+    with patch("custom_components.hass_dyson.services._persistent_map_cache", cache):
+        rooms = {r["id"]: r for r in sensor.extra_state_attributes["kamers"]}
+    assert rooms[10]["naam"] == "Woonkamer"
+    assert rooms[10]["robot_naam"] == "Living room1"
+    assert rooms[16]["naam"] == "Zithoek"
+    assert rooms[11]["naam"] == "Slaapkamer"
+
+
+def test_without_a_cached_map_the_robot_name_is_kept(sensor, coordinator):
+    coordinator._handle_jdm_status_message(REAL_ANSWER)
+    room = sensor.extra_state_attributes["kamers"][0]
+    assert room["naam"] == room["robot_naam"]
