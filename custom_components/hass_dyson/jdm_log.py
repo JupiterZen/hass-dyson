@@ -31,8 +31,11 @@ _NOISE_METHODS = frozenset(
         "service.get_map_list",
     }
 )
-# Broadcasts the robot repeats continuously (battery, dock drying timer).
-_NOISE_POST_KEYS = frozenset({"quantity", "work_time"})
+# Broadcasts the robot repeats continuously (battery, dock drying timer, and
+# during a run its live position ``cur_path`` plus area/time counters).
+_NOISE_POST_KEYS = frozenset(
+    {"quantity", "work_time", "cur_path", "cleaning_area", "cleaning_time"}
+)
 
 _recorders: dict[str, JdmFlightRecorder] = {}
 

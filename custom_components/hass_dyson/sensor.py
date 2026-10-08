@@ -3565,6 +3565,13 @@ _ROBOT_FAULT_CODE_LABELS: dict[str, str] = {
     # nextActionRequired=USER_CONTINUE and the MyDyson app showed "Roterende
     # dweilborstel zit vast" (rotating mop brush stuck).
     "630": "Rotating mop brush stuck",
+    # Confirmed live 8 okt 2026: lifting the robot mid-run gave 501
+    # (nextActionRequired=WAIT_TO_CLEAR) together with the jdm event
+    # ``event.overhanging_wheel.post`` and FULL_CLEAN_PAUSED; ten seconds later
+    # 2509 (USER_CONTINUE), cleared once the robot was put down. 2509's own
+    # meaning is inferred from that sequence, not confirmed.
+    "501": "Robot lifted (wheel hanging)",
+    "2509": "Waiting to continue after lift (unconfirmed)",
     # Confirmed live 7 sep 2026: seen during dockState=DRYING_MOP with
     # nextActionRequired=LOG_ONLY — informational only, no user action.
     "2105": "Drying (informational)",
@@ -3677,6 +3684,14 @@ _ROBOT_FAULT_MESSAGES_NL: dict[str, tuple[str, str]] = {
     "2510": (
         "Robot is opgetild (tilsensor)",
         "Zet de robot terug op de grond of het dock; verdwijnt vanzelf.",
+    ),
+    "501": (
+        "Robot is opgetild (wiel hangt)",
+        "Zet de robot terug op de grond en hervat daarna.",
+    ),
+    "2509": (
+        "Wacht op hervatten na optillen (niet bevestigd)",
+        "Druk op hervatten zodra de robot weer op de grond staat.",
     ),
     "2105": ("Dock is aan het drogen", ""),
     "2108": ("Informatief (betekenis niet bevestigd)", ""),

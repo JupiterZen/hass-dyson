@@ -49,3 +49,11 @@ def test_unknown_informational_code_is_not_alarming():
     sensor = _sensor([{"faultCode": "2103", "nextActionRequired": "LOG_ONLY"}])
     assert sensor.native_value == "Informatief (code 2103)"
     assert sensor.extra_state_attributes["actie_nodig"] is False
+
+
+def test_lifted_robot_codes_have_dutch_messages():
+    lifted = _sensor([{"faultCode": 501, "nextActionRequired": "WAIT_TO_CLEAR"}])
+    assert lifted.native_value == "Robot is opgetild (wiel hangt)"
+    cont = _sensor([{"faultCode": 2509, "nextActionRequired": "USER_CONTINUE"}])
+    assert cont.extra_state_attributes["actie_nodig"] is True
+    assert "hervatten" in cont.native_value

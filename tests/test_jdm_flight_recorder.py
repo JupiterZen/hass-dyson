@@ -22,6 +22,12 @@ class TestNoiseFilter:
         assert is_noise(
             {"method": "prop.post", "params": {"work_time": {"total": 10800}}}
         )
+        assert is_noise(
+            {"method": "prop.post", "params": {"cur_path": [1, -0.03, 0.0, -1.7, 0, 1]}}
+        )
+        assert is_noise(
+            {"method": "prop.post", "params": {"quantity": 85, "cleaning_area": 1504}}
+        )
 
     def test_everything_else_is_kept(self):
         assert not is_noise({"method": "prop.set", "params": {"alarm": 1}})
