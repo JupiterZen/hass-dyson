@@ -247,3 +247,31 @@ class TestSensor:
             await sensor.async_update()
         fetch.assert_not_awaited()
         assert sensor._pending
+
+
+class TestZoneUniverse:
+    """9 okt 2026: an empty map cache must not drop never-cleaned rooms."""
+
+    def test_empty_cache_keeps_the_last_known_rooms(self):
+        sensor, _ = _sensor()
+        sensor._state["zones"] = {"Woonkamer": {}}  # only one room has a record
+        with patch(
+            "custom_components.hass_dyson.sensor._cloud_zone_names_for"
+        ) as names:
+            names.return_value = {
+                "10": "Woonkamer",
+                "12": "Kinderkamer",
+                "16": "Zithoek",
+            }
+            assert sensor._zone_names() == ["Woonkamer", "Kinderkamer", "Zithoek"]
+            names.return_value = {}  # cache wiped by a setting change
+            assert sensor._zone_names() == ["Woonkamer", "Kinderkamer", "Zithoek"]
+
+    def test_without_any_known_rooms_the_fixed_list_is_used(self):
+        sensor, _ = _sensor()
+        sensor._state["zones"] = {"Woonkamer": {}}
+        with patch(
+            "custom_components.hass_dyson.sensor._cloud_zone_names_for", return_value={}
+        ):
+            names = sensor._zone_names()
+        assert names == [*ds.TIEBREAK]

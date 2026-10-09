@@ -5334,6 +5334,7 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
         self._pending = True
         self._retries = 0
         self._last_ingest: str | None = None
+        self._known_names: list[str] = []
 
     @property
     def should_poll(self) -> bool:
@@ -5348,13 +5349,26 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
         processed = last.attributes.get("processed_ids")
         if isinstance(zones, dict) and isinstance(processed, list):
             self._state = {"zones": zones, "processed": [str(i) for i in processed]}
+        known = last.attributes.get("bekende_kamers")
+        if isinstance(known, list):
+            self._known_names = [str(n) for n in known]
         self._publish()
 
     def _zone_names(self) -> list[str]:
+        """The rooms on the current map.
+
+        The cloud map cache is wiped by every room-setting change, so it is
+        briefly empty; the last list seen is kept (and survives a restart).
+        Never fall back to "rooms that have a record": a room that was never
+        cleaned has none and would drop out of the plan (seen 9 okt 2026).
+        """
         names = list(_cloud_zone_names_for(self.coordinator).values())
         if names:
+            self._known_names = names
             return names
-        return list(self._state["zones"]) or list(day_status.TIEBREAK)
+        if self._known_names:
+            return list(self._known_names)
+        return list(dict.fromkeys([*day_status.TIEBREAK, *self._state["zones"]]))
 
     def _publish(self) -> None:
         result = day_status.evaluate(self._state, dt_util.now(), self._zone_names())
@@ -5367,6 +5381,7 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
             "cant_clean_vandaag": result["cant_clean_vandaag"],
             "kamers": result["kamers"],
             "laatst_bijgewerkt": self._last_ingest,
+            "bekende_kamers": self._known_names,
             "zones_state": self._state["zones"],
             "processed_ids": self._state["processed"],
         }
