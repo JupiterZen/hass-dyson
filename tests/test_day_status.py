@@ -275,3 +275,76 @@ class TestZoneUniverse:
         ):
             names = sensor._zone_names()
         assert names == [*ds.TIEBREAK]
+
+
+def test_mark_complete_moves_last_completed_forward_only():
+    state = ds.new_state()
+    assert ds.mark_complete(state, "Keuken", at(9, 9, 10))
+    assert not ds.mark_complete(state, "Keuken", at(9, 9, 5))
+    assert ds.mark_complete(state, "Keuken", at(9, 9, 30))
+    assert state["zones"]["Keuken"]["last_status"] == ds.COMPLETE
+    assert ds.evaluate(state, at(9, 10), ROOMS)["kamers"]["Keuken"]["klaar_vandaag"]
+
+
+class TestLiveCompletions:
+    @pytest.mark.asyncio
+    async def test_rooms_finished_during_a_run_count_straight_away(self):
+        sensor, _ = _sensor()
+        tally = MagicMock(
+            attributes={
+                "zone_names": ["Kinderkamer", "Zithoek"],
+                "last_reset_date": ds.day_of(at(9, 12)).isoformat(),
+            }
+        )
+        registry = MagicMock()
+        registry.async_get_entity_id.return_value = "sensor.ronde"
+        sensor.hass.states.get.return_value = tally
+        with (
+            patch(
+                "homeassistant.helpers.entity_registry.async_get", return_value=registry
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor._is_cleaning", return_value=True
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor._cloud_zone_names_for",
+                return_value={},
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor.dt_util.now",
+                return_value=at(9, 9, 20),
+            ),
+        ):
+            await sensor.async_update()
+        assert sensor._attr_extra_state_attributes["klaar"] == [
+            "Kinderkamer",
+            "Zithoek",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_stale_tally_from_another_day_is_ignored(self):
+        sensor, _ = _sensor()
+        tally = MagicMock(
+            attributes={"zone_names": ["Keuken"], "last_reset_date": "2026-10-08"}
+        )
+        registry = MagicMock()
+        registry.async_get_entity_id.return_value = "sensor.ronde"
+        sensor.hass.states.get.return_value = tally
+        with (
+            patch(
+                "homeassistant.helpers.entity_registry.async_get", return_value=registry
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor._is_cleaning", return_value=True
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor._cloud_zone_names_for",
+                return_value={},
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor.dt_util.now",
+                return_value=at(9, 9, 20),
+            ),
+        ):
+            await sensor.async_update()
+        assert sensor._attr_extra_state_attributes["klaar"] == []

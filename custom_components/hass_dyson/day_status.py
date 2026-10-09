@@ -99,6 +99,21 @@ def ingest_record(
     return True
 
 
+def mark_complete(state: dict[str, Any], name: str, when: datetime) -> bool:
+    """Record a room that finished during the clean in progress (live signal).
+
+    Attempts are not counted here; the finished record does that later, and its
+    own completion stamp only ever moves ``last_completed`` forward.
+    """
+    entry = _zone(state, name)
+    stamp = when.isoformat()
+    if entry["last_completed"] is not None and entry["last_completed"] >= stamp:
+        return False
+    entry["last_completed"] = stamp
+    entry["last_status"] = COMPLETE
+    return True
+
+
 def _sort_key(name: str, entry: dict[str, Any] | None) -> tuple[Any, ...]:
     last = entry.get("last_completed") if entry else None
     last_day = (

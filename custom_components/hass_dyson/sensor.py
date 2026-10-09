@@ -5386,13 +5386,35 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
             "processed_ids": self._state["processed"],
         }
 
+    def _mark_live_completions(self) -> None:
+        from homeassistant.helpers import entity_registry as er
+
+        entity_id = er.async_get(self.hass).async_get_entity_id(
+            "sensor",
+            DOMAIN,
+            f"{self.coordinator.serial_number}_kamers_al_klaar_deze_ronde",
+        )
+        state = self.hass.states.get(entity_id) if entity_id else None
+        if state is None:
+            return
+        # Ignore a tally left over from an earlier day (it resets when idle).
+        if state.attributes.get("last_reset_date") != dt_util.now().date().isoformat():
+            return
+        names = state.attributes.get("zone_names")
+        if isinstance(names, list):
+            for name in names:
+                day_status.mark_complete(self._state, str(name), dt_util.now())
+
     async def async_update(self) -> None:
         from .image import _fetch_v2_floor_plan_data
 
         if _is_cleaning(self.coordinator):
-            # A run in progress is only final once it ends.
+            # The cloud record is only final once the run ends, but rooms that
+            # finished during it are already known to the resume tally (fed by
+            # the live map): use those so the status is not blind meanwhile.
             self._pending = True
             self._retries = 0
+            self._mark_live_completions()
             self._publish()
             return
         now = time.monotonic()
