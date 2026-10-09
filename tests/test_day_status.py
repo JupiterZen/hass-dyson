@@ -191,6 +191,7 @@ def _sensor():
     coordinator.data = {}
     sensor = DysonRobotDayStatusSensor(coordinator)
     sensor.hass = MagicMock()
+    sensor.hass.async_add_executor_job = AsyncMock(side_effect=lambda f, *a: f(*a))
     return sensor, coordinator
 
 
@@ -277,13 +278,90 @@ class TestZoneUniverse:
         assert names == [*ds.TIEBREAK]
 
 
-def test_mark_complete_moves_last_completed_forward_only():
+def test_live_mark_counts_for_today_but_the_record_has_the_final_say():
     state = ds.new_state()
     assert ds.mark_complete(state, "Keuken", at(9, 9, 10))
     assert not ds.mark_complete(state, "Keuken", at(9, 9, 5))
-    assert ds.mark_complete(state, "Keuken", at(9, 9, 30))
-    assert state["zones"]["Keuken"]["last_status"] == ds.COMPLETE
     assert ds.evaluate(state, at(9, 10), ROOMS)["kamers"]["Keuken"]["klaar_vandaag"]
+    # the finished record then says the room was only thinly covered
+    ds.ingest_record(
+        state, "r1", at(9, 10, 20), zones(Keuken=ds.COMPLETE), coverage={"Keuken": 0.2}
+    )
+    result = ds.evaluate(state, at(9, 11), ROOMS)
+    assert not result["kamers"]["Keuken"]["klaar_vandaag"]
+    assert result["te_weinig_gedekt_vandaag"] == ["Keuken"]
+
+
+def test_a_live_mark_expires_when_no_record_ever_confirms_it():
+    state = ds.new_state()
+    ds.mark_complete(state, "Keuken", at(9, 5))
+    assert ds.evaluate(state, at(9, 10), ROOMS)["kamers"]["Keuken"]["klaar_vandaag"]
+    assert not ds.evaluate(state, at(9, 12), ROOMS)["kamers"]["Keuken"]["klaar_vandaag"]
+
+
+class TestCoverage:
+    SQUARE = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+
+    def test_full_sweep(self):
+        path = [(x / 10, y / 4) for x in range(0, 21) for y in range(0, 9)]
+        assert ds.coverage_fraction(self.SQUARE, path) > 0.95
+
+    def test_a_corner_only_is_thin(self):
+        path = [(0.1 + i * 0.05, 0.1) for i in range(10)]
+        assert ds.coverage_fraction(self.SQUARE, path) < 0.1
+
+    def test_repeated_passes_do_not_inflate_the_share(self):
+        one = [(0.1 + i * 0.05, 0.1) for i in range(10)]
+        assert ds.coverage_fraction(self.SQUARE, one * 20) == ds.coverage_fraction(
+            self.SQUARE, one
+        )
+
+    def test_unmeasurable_gives_none(self):
+        assert ds.coverage_fraction([(0, 0), (1, 1)], [(0, 0)]) is None
+
+
+class TestThinRooms:
+    def test_complete_but_thin_is_not_done_and_is_flagged(self):
+        state = ds.new_state()
+        ds.ingest_record(
+            state,
+            "r1",
+            at(9, 10, 20),
+            zones(Kinderkamer=ds.COMPLETE, Gang=ds.COMPLETE),
+            coverage={"Kinderkamer": 0.28, "Gang": 0.70},
+        )
+        result = ds.evaluate(state, at(9, 11), ROOMS)
+        assert result["klaar"] == ["Gang"]
+        assert result["te_weinig_gedekt_vandaag"] == ["Kinderkamer"]
+        assert result["kamers"]["Kinderkamer"]["dekking"] == 0.28
+        assert "Kinderkamer" in result["open"]
+
+    def test_unknown_coverage_trusts_the_robot(self):
+        state = ds.new_state()
+        ds.ingest_record(state, "r1", at(9, 10), zones(Gang=ds.COMPLETE), coverage={})
+        assert ds.evaluate(state, at(9, 11), ROOMS)["klaar"] == ["Gang"]
+
+    def test_replay_of_9_okt_run(self):
+        """Measured on the real record: Slaapkamer 6,5 %, Kinderkamer 28 %."""
+        state = ds.new_state()
+        ds.ingest_record(
+            state,
+            "run",
+            at(9, 10, 20),
+            zones(**dict.fromkeys(ROOMS, ds.COMPLETE)),
+            coverage={
+                "Woonkamer": 0.818,
+                "Slaapkamer": 0.065,
+                "Zithoek": 0.884,
+                "Kinderkamer": 0.28,
+                "Gang": 0.701,
+                "Wasruimte": 0.738,
+                "Keuken": 0.847,
+            },
+        )
+        result = ds.evaluate(state, at(9, 11), ROOMS)
+        assert sorted(result["open"]) == ["Kinderkamer", "Slaapkamer"]
+        assert not result["alles_klaar"]
 
 
 class TestLiveCompletions:

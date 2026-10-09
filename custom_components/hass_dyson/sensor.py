@@ -5347,8 +5347,17 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
             return
         zones = last.attributes.get("zones_state")
         processed = last.attributes.get("processed_ids")
-        if isinstance(zones, dict) and isinstance(processed, list):
-            self._state = {"zones": zones, "processed": [str(i) for i in processed]}
+        if (
+            isinstance(zones, dict)
+            and isinstance(processed, list)
+            and last.attributes.get("state_version") == day_status.STATE_VERSION
+        ):
+            # An older layout is rebuilt from the cloud records instead.
+            self._state = {
+                "version": day_status.STATE_VERSION,
+                "zones": zones,
+                "processed": [str(i) for i in processed],
+            }
         known = last.attributes.get("bekende_kamers")
         if isinstance(known, list):
             self._known_names = [str(n) for n in known]
@@ -5379,12 +5388,38 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
             "klaar": result["klaar"],
             "alles_klaar": result["alles_klaar"],
             "cant_clean_vandaag": result["cant_clean_vandaag"],
+            "te_weinig_gedekt_vandaag": result["te_weinig_gedekt_vandaag"],
             "kamers": result["kamers"],
             "laatst_bijgewerkt": self._last_ingest,
             "bekende_kamers": self._known_names,
+            "state_version": day_status.STATE_VERSION,
             "zones_state": self._state["zones"],
             "processed_ids": self._state["processed"],
         }
+
+    async def _coverage(
+        self, data: dict[str, Any], zones: list[dict[str, Any]]
+    ) -> dict[str, float | None]:
+        """Swept share of each completed room's reachable floor (see day_status)."""
+        path = [
+            (float(p["x"]), float(p["y"]))
+            for p in data.get("cleanPath") or []
+            if isinstance(p, dict) and p.get("x") is not None
+        ]
+        result: dict[str, float | None] = {}
+        for zone in zones:
+            name = zone.get("name") if isinstance(zone, dict) else None
+            if not isinstance(name, str) or zone.get("cleanStatus") != "CLEAN_COMPLETE":
+                continue
+            floor = [
+                (float(p["x"]), float(p["y"]))
+                for p in zone.get("visited") or []
+                if isinstance(p, dict) and p.get("x") is not None
+            ]
+            result[name] = await self.hass.async_add_executor_job(
+                day_status.coverage_fraction, floor, path
+            )
+        return result
 
     def _mark_live_completions(self) -> None:
         from homeassistant.helpers import entity_registry as er
@@ -5450,7 +5485,10 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
                 if not stamps or not isinstance(zones, list):
                     continue
                 when = dt_util.as_local(dt_util.utc_from_timestamp(max(stamps)))
-                if day_status.ingest_record(self._state, clean_id, when, zones):
+                coverage = await self._coverage(data, zones)
+                if day_status.ingest_record(
+                    self._state, clean_id, when, zones, coverage
+                ):
                     ingested += 1
             if ingested:
                 self._last_ingest = dt_util.now().isoformat()
