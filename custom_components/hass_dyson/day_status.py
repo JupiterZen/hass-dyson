@@ -13,6 +13,10 @@ Rules (agreed 8 okt 2026):
   not be cleaned (``CANT_CLEAN``) is not done and is tried again.
 * Open rooms are ordered by the *day* they were last completed, oldest first
   (never completed counts as oldest), and ties are broken by a fixed list.
+* A room that failed twice today (thin or ``CANT_CLEAN``) is given up for the
+  rest of the day instead of being retried at every departure; the day change
+  or a completed manual run clears it. Rooms the robot never reached
+  (``CLEAN_PENDING``, e.g. someone came home early) are not attempts.
 * ``CLEAN_COMPLETE`` is the robot's own verdict and it can be wrong: on 9 okt
   2026 it reported the Kinderkamer and the Slaapkamer complete after driving a
   few metres in through the door. A complete room therefore only counts when at
@@ -29,6 +33,7 @@ from typing import Any
 DAY_START_HOUR = 4
 COMPLETE = "CLEAN_COMPLETE"
 NOT_REQUESTED = "CLEAN_NOT_REQUESTED"
+PENDING = "CLEAN_PENDING"
 CANT_CLEAN = "CANT_CLEAN"
 
 # Fixed order for rooms whose last completion falls on the same day: short
@@ -46,6 +51,9 @@ TIEBREAK: tuple[str, ...] = (
 _MAX_PROCESSED = 60
 STATE_VERSION = 2
 MIN_COVERAGE = 0.40
+# A room that failed (thin or could not be cleaned) this many times in one day
+# is given up until the next day; a manual run that completes still counts.
+MAX_FAILED_ATTEMPTS = 2
 SWEEP_RADIUS_M = 0.15
 GRID_M = 0.05
 THIN = "TE_WEINIG_GEDEKT"
@@ -137,7 +145,16 @@ def ingest_record(
         if not isinstance(zone, dict):
             continue
         name, status = zone.get("name"), zone.get("cleanStatus")
-        if not isinstance(name, str) or not name or status in (None, NOT_REQUESTED):
+        if (
+            not isinstance(name, str)
+            or not name
+            or status
+            in (
+                None,
+                NOT_REQUESTED,
+                PENDING,
+            )
+        ):
             continue
         entry = _zone(state, name)
         entry["live_completed"] = None  # the finished record is authoritative
@@ -209,17 +226,25 @@ def evaluate(
             "dekking": entry.get("last_coverage"),
             "pogingen_vandaag": attempts,
         }
+    for r in rooms.values():
+        r["opgegeven"] = (
+            not r["klaar_vandaag"]
+            and r["pogingen_vandaag"] >= MAX_FAILED_ATTEMPTS
+            and r["laatste_status"] in (THIN, CANT_CLEAN)
+        )
     open_rooms = sorted(
-        (n for n, r in rooms.items() if not r["klaar_vandaag"]),
+        (n for n, r in rooms.items() if not r["klaar_vandaag"] and not r["opgegeven"]),
         key=lambda n: _sort_key(n, zones.get(n)),
     )
+    given_up = [n for n in zone_names if rooms[n]["opgegeven"]]
     done_rooms = [n for n in zone_names if rooms[n]["klaar_vandaag"]]
     return {
         "dag": today,
         "kamers": rooms,
         "open": open_rooms,
         "klaar": done_rooms,
-        "alles_klaar": bool(zone_names) and not open_rooms,
+        "alles_klaar": bool(zone_names) and not open_rooms and not given_up,
+        "opgegeven_vandaag": given_up,
         "cant_clean_vandaag": [
             n
             for n, r in rooms.items()

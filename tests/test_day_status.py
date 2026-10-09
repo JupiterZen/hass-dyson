@@ -426,3 +426,94 @@ class TestLiveCompletions:
         ):
             await sensor.async_update()
         assert sensor._attr_extra_state_attributes["klaar"] == []
+
+
+class TestGivingUp:
+    def test_two_failed_attempts_give_a_room_up_for_the_day(self):
+        state = ds.new_state()
+        ds.ingest_record(
+            state, "a", at(9, 10), zones(Slaapkamer=ds.COMPLETE), {"Slaapkamer": 0.06}
+        )
+        one = ds.evaluate(state, at(9, 11), ROOMS)
+        assert "Slaapkamer" in one["open"] and one["opgegeven_vandaag"] == []
+        ds.ingest_record(
+            state, "b", at(9, 18), zones(Slaapkamer=ds.COMPLETE), {"Slaapkamer": 0.065}
+        )
+        two = ds.evaluate(state, at(9, 19), ROOMS)
+        assert two["opgegeven_vandaag"] == ["Slaapkamer"]
+        assert "Slaapkamer" not in two["open"]
+        assert not two["alles_klaar"]
+
+    def test_the_next_day_starts_fresh(self):
+        state = ds.new_state()
+        for i, hour in enumerate((10, 18)):
+            ds.ingest_record(
+                state, f"r{i}", at(9, hour), zones(Slaapkamer=ds.CANT_CLEAN)
+            )
+        assert ds.evaluate(state, at(9, 19), ROOMS)["opgegeven_vandaag"] == [
+            "Slaapkamer"
+        ]
+        tomorrow = ds.evaluate(state, at(10, 9), ROOMS)
+        assert tomorrow["opgegeven_vandaag"] == []
+        assert "Slaapkamer" in tomorrow["open"]
+
+    def test_a_completed_manual_run_clears_it(self):
+        state = ds.new_state()
+        for i, hour in enumerate((10, 18)):
+            ds.ingest_record(
+                state, f"r{i}", at(9, hour), zones(Slaapkamer=ds.CANT_CLEAN)
+            )
+        ds.ingest_record(
+            state, "hand", at(9, 20), zones(Slaapkamer=ds.COMPLETE), {"Slaapkamer": 0.8}
+        )
+        result = ds.evaluate(state, at(9, 21), ROOMS)
+        assert "Slaapkamer" in result["klaar"]
+        assert result["opgegeven_vandaag"] == []
+
+    def test_interrupted_rooms_are_never_given_up(self):
+        """Stopping because someone came home is not a failure."""
+        state = ds.new_state()
+        for i, hour in enumerate((10, 12, 14)):
+            ds.ingest_record(
+                state, f"r{i}", at(9, hour), zones(Woonkamer="CLEAN_IN_PROGRESS")
+            )
+        result = ds.evaluate(state, at(9, 15), ROOMS)
+        assert "Woonkamer" in result["open"]
+        assert result["opgegeven_vandaag"] == []
+
+    def test_rooms_the_robot_never_reached_are_not_attempts(self):
+        state = ds.new_state()
+        ds.ingest_record(
+            state, "a", at(9, 10), zones(Gang=ds.COMPLETE, Slaapkamer="CLEAN_PENDING")
+        )
+        assert "Slaapkamer" not in state["zones"]
+
+    def test_replay_of_9_okt_evening(self):
+        state = ds.new_state()
+        ds.ingest_record(
+            state,
+            "morgen",
+            at(9, 10, 20),
+            zones(**dict.fromkeys(ROOMS, ds.COMPLETE)),
+            coverage={
+                "Woonkamer": 0.82,
+                "Slaapkamer": 0.065,
+                "Zithoek": 0.88,
+                "Kinderkamer": 0.28,
+                "Gang": 0.70,
+                "Wasruimte": 0.74,
+                "Keuken": 0.85,
+            },
+        )
+        ds.ingest_record(
+            state,
+            "avond",
+            at(9, 18, 4),
+            zones(Kinderkamer=ds.COMPLETE, Slaapkamer=ds.COMPLETE),
+            coverage={"Kinderkamer": 0.45, "Slaapkamer": 0.064},
+        )
+        result = ds.evaluate(state, at(9, 18, 30), ROOMS)
+        assert result["open"] == []
+        assert result["opgegeven_vandaag"] == ["Slaapkamer"]
+        assert "Kinderkamer" in result["klaar"]
+        assert not result["alles_klaar"]

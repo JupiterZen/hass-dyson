@@ -5389,6 +5389,7 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
             "alles_klaar": result["alles_klaar"],
             "cant_clean_vandaag": result["cant_clean_vandaag"],
             "te_weinig_gedekt_vandaag": result["te_weinig_gedekt_vandaag"],
+            "opgegeven_vandaag": result["opgegeven_vandaag"],
             "kamers": result["kamers"],
             "laatst_bijgewerkt": self._last_ingest,
             "bekende_kamers": self._known_names,
