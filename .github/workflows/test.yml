@@ -38,7 +38,7 @@ jobs:
           python-version: "3.14"
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/pip
@@ -55,7 +55,7 @@ jobs:
           pip install -e .
 
       - name: Cache pytest
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .pytest_cache
@@ -71,6 +71,7 @@ jobs:
 
       - name: Run tests with coverage
         run: |
+          set -o pipefail
           python -m pytest tests/ \
             --cov=custom_components.hass_dyson \
             --cov-report=xml \
@@ -89,6 +90,7 @@ jobs:
           python -m coverage report --show-missing > coverage.txt 2>&1 || true
 
       - name: Upload coverage reports
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v5
         with:
           name: coverage-reports-${{ github.run_number }}
@@ -102,6 +104,7 @@ jobs:
           retention-days: 30
 
       - name: Upload coverage reports to Codecov
+        if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -143,7 +146,7 @@ jobs:
           python-version: "3.14"
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/pip
@@ -168,7 +171,7 @@ jobs:
           python -m ruff check . --output-format=github
 
       - name: Cache mypy
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .mypy_cache
           key: ${{ runner.os }}-mypy-3.14-${{ github.sha }}

@@ -327,6 +327,29 @@ class TestSensorPlatformSetup:
         assert part_types == {"brushBar", "cleaningSolution"}
 
     @pytest.mark.asyncio
+    async def test_async_setup_entry_does_not_duplicate_consumables(
+        self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
+    ):
+        """Only DysonRobotConsumableSensor is created, not upstream's life sensor."""
+        pure_mock_hass.data[DOMAIN] = {
+            pure_mock_config_entry.entry_id: pure_mock_coordinator
+        }
+        mock_add_entities = MagicMock()
+
+        pure_mock_coordinator.device_category = ["robot"]
+        pure_mock_coordinator.device.robot_battery_level = 85
+        pure_mock_coordinator.data = {"consumables": [{"type": "brushBar", "usage": 1}]}
+
+        await async_setup_entry(
+            pure_mock_hass, pure_mock_config_entry, mock_add_entities
+        )
+
+        from custom_components.hass_dyson.sensor import DysonConsumableLifeSensor
+
+        entities = mock_add_entities.call_args[0][0]
+        assert not any(isinstance(e, DysonConsumableLifeSensor) for e in entities)
+
+    @pytest.mark.asyncio
     async def test_async_setup_entry_no_consumable_sensors_when_absent(
         self, pure_mock_hass, pure_mock_config_entry, pure_mock_coordinator
     ):
@@ -348,6 +371,62 @@ class TestSensorPlatformSetup:
         from custom_components.hass_dyson.sensor import DysonRobotConsumableSensor
 
         assert not any(isinstance(e, DysonRobotConsumableSensor) for e in entities)
+
+
+class TestDysonConsumableLifeSensor:
+    """Upstream's per-consumable life sensor (class kept for upstream parity).
+
+    Not created by ``async_setup_entry``: the fork's DysonRobotConsumableSensor
+    already covers every reported part, so creating both would give two
+    entities per consumable.
+    """
+
+    def test_consumable_life_sensor_init(self, pure_mock_coordinator):
+        """Test consumable life sensor initialization."""
+        from custom_components.hass_dyson.sensor import DysonConsumableLifeSensor
+
+        sensor = DysonConsumableLifeSensor(pure_mock_coordinator, "brushBar")
+
+        assert sensor.consumable_type == "brushBar"
+        assert (
+            sensor._attr_unique_id
+            == f"{pure_mock_coordinator.serial_number}_brushBar_life"
+        )
+        assert sensor._attr_translation_placeholders == {"consumable_type": "Brush Bar"}
+        assert sensor._attr_native_unit_of_measurement == PERCENTAGE
+
+    def test_consumable_life_sensor_update(self, pure_mock_coordinator, pure_mock_hass):
+        """Test consumable life sensor reads from device.robot_consumable_life."""
+        from custom_components.hass_dyson.sensor import DysonConsumableLifeSensor
+
+        pure_mock_coordinator.device.robot_consumable_life = {
+            "brushBar": 86,
+            "ioniserCartridge": None,
+        }
+
+        sensor = DysonConsumableLifeSensor(pure_mock_coordinator, "brushBar")
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == 86
+
+    def test_consumable_life_sensor_not_applicable(
+        self, pure_mock_coordinator, pure_mock_hass
+    ):
+        """Test consumable life sensor is None when the item is not applicable."""
+        from custom_components.hass_dyson.sensor import DysonConsumableLifeSensor
+
+        pure_mock_coordinator.device.robot_consumable_life = {"ioniserCartridge": None}
+
+        sensor = DysonConsumableLifeSensor(pure_mock_coordinator, "ioniserCartridge")
+        sensor.hass = pure_mock_hass
+
+        with patch.object(sensor, "async_write_ha_state"):
+            sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
 
 
 class TestDysonPM25Sensor:
@@ -1517,7 +1596,10 @@ class TestDysonRobotActiveFaultSensor:
             sensor._handle_coordinator_update()
 
         assert sensor._attr_native_value == "none"
-        assert sensor._attr_extra_state_attributes == {"active_faults": []}
+        assert sensor._attr_extra_state_attributes == {
+            "active_faults": [],
+            "fault_codes": [],
+        }
 
     def test_sensor_known_fault_code(self, pure_mock_coordinator, pure_mock_hass):
         from custom_components.hass_dyson.sensor import (
