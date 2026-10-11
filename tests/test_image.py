@@ -3512,3 +3512,84 @@ class TestFetchLiveMapMapping:
         assert await image_module._fetch_live_map_mapping(coord) is None
         assert await image_module._fetch_live_map_mapping(coord) is None
         assert client.get_live_map_mapping.await_count == 2
+
+
+class TestUserFurniture:
+    """Furniture the user drew in the MyDyson app (``userDefined: true``)."""
+
+    @staticmethod
+    def _coordinator_with(mock_coordinator, payload=None, error=None):
+        import httpx
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json = MagicMock(return_value=payload)
+        http_client = AsyncMock()
+        if error:
+            http_client.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
+        else:
+            http_client.get = AsyncMock(return_value=response)
+        fake_client = MagicMock()
+        fake_client.country = "NL"
+        fake_client._get_client = AsyncMock(return_value=http_client)
+
+        @asynccontextmanager
+        async def make_client():
+            yield fake_client
+
+        mock_coordinator.async_cloud_client = make_client
+        return http_client
+
+    @pytest.mark.asyncio
+    async def test_only_user_defined_items_are_returned(self, mock_coordinator):
+        from custom_components.hass_dyson import image as image_module
+        from custom_components.hass_dyson.coordinator import TTLCache
+
+        fridge = {"id": "1", "type": "refrigerator", "userDefined": True, "points": []}
+        robot = {"id": "9", "type": "tvStand", "userDefined": False, "points": []}
+        http_client = self._coordinator_with(
+            mock_coordinator, {"furniture": [fridge, robot]}
+        )
+        with patch.object(image_module, "_user_furniture_cache", TTLCache(300)):
+            first = await image_module._fetch_user_furniture(mock_coordinator, "m1")
+            second = await image_module._fetch_user_furniture(mock_coordinator, "m1")
+
+        assert first == [fridge] and second == [fridge]
+        assert http_client.get.await_count == 1  # second call served from cache
+        assert (
+            "/v2/app/VS9-GB-HJA0000A/persistent-maps/m1"
+            in (http_client.get.await_args.args[0])
+        )
+
+    @pytest.mark.asyncio
+    async def test_failure_returns_empty_list(self, mock_coordinator):
+        from custom_components.hass_dyson import image as image_module
+        from custom_components.hass_dyson.coordinator import TTLCache
+
+        self._coordinator_with(mock_coordinator, error=True)
+        with patch.object(image_module, "_user_furniture_cache", TTLCache(300)):
+            assert (
+                await image_module._fetch_user_furniture(mock_coordinator, "m1") == []
+            )
+
+    @pytest.mark.asyncio
+    async def test_merge_adds_new_and_skips_duplicates(self, mock_coordinator):
+        from custom_components.hass_dyson import image as image_module
+        from custom_components.hass_dyson.coordinator import TTLCache
+
+        pts = [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 1.0, "y": 1.0}]
+        dup = {"id": "1", "userDefined": True, "points": pts}
+        new = {"id": "2", "userDefined": True, "points": [{"x": 5.0, "y": 5.0}]}
+        self._coordinator_with(mock_coordinator, {"furniture": [dup, new]})
+        data = {"furniture": [{"id": "r", "userDefined": False, "points": pts}]}
+        with patch.object(image_module, "_user_furniture_cache", TTLCache(300)):
+            merged = await image_module._with_user_furniture(
+                mock_coordinator, "m1", data
+            )
+            untouched = await image_module._with_user_furniture(
+                mock_coordinator, None, data
+            )
+
+        assert [f["id"] for f in merged["furniture"]] == ["r", "2"]
+        assert untouched is data
+        assert len(data["furniture"]) == 1  # input not mutated

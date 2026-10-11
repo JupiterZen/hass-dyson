@@ -130,6 +130,9 @@ async def async_setup_entry(
 _persist_map_cache = TTLCache(6 * 3600)
 _map_image_cache = TTLCache(10 * 60)
 _floor_plan_cache = TTLCache(6 * 3600)
+# Furniture the user drew in the MyDyson app. Edited rarely, but a change
+# should show up within minutes, so a short TTL.
+_user_furniture_cache = TTLCache(5 * 60)
 
 # _fetch_live_map_cleaning is polled every ~30s by the floor-plan image
 # entity AND separately by the three per-clean detection sensors (see
@@ -328,6 +331,75 @@ async def _fetch_v2_floor_plan_data(
 
     _floor_plan_cache.set(key, json.dumps(data).encode())
     return data
+
+
+async def _fetch_user_furniture(
+    coordinator: DysonDataUpdateCoordinator, map_id: str
+) -> list[dict]:
+    """Furniture the user added in the MyDyson app (``userDefined: true``).
+
+    The app stores it with ``PUT /v2/app/{serial}/persistent-maps/{map}`` and
+    body ``{"furniture": [{"id", "type", "userDefined": true, "points"}]}``
+    (captured 11 okt 2026) and the matching ``GET`` returns only these items.
+    The robot's own furniture guesses (``userDefined: false``) are not in that
+    response; they come with the clean records. ``libdyson_rest``'s
+    ``PersistentMap`` drops the field, so this reads the raw JSON.
+
+    Returns ``[]`` on any failure (cached briefly): a missing overlay must
+    never break the map.
+    """
+    import httpx
+    from libdyson_rest.exceptions import DysonAPIError, DysonAuthError
+    from libdyson_rest.utils import get_api_hostname
+
+    key = f"{coordinator.serial_number}:uf:{map_id}"
+    cached = _user_furniture_cache.get(key)
+    if cached is not None:
+        return cached
+
+    items: list[dict] = []
+    async with coordinator.async_cloud_client() as client:
+        if client is None:
+            return []
+        try:
+            http_client = await client._get_client()  # noqa: SLF001
+            url = (
+                f"{get_api_hostname(client.country).rstrip('/')}"
+                f"/v2/app/{coordinator.serial_number}/persistent-maps/{map_id}"
+            )
+            response = await http_client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                items = [
+                    f
+                    for f in data.get("furniture") or []
+                    if isinstance(f, dict) and f.get("userDefined")
+                ]
+        except (DysonAPIError, DysonAuthError, httpx.HTTPError, ValueError) as err:
+            _LOGGER.debug(
+                "User furniture fetch failed for %s map %s: %s",
+                coordinator.serial_number,
+                map_id,
+                err,
+            )
+    _user_furniture_cache.set(key, items)
+    return items
+
+
+async def _with_user_furniture(
+    coordinator: DysonDataUpdateCoordinator, map_id: str | None, data: dict
+) -> dict:
+    """Copy of ``data`` with the user's own furniture added to ``furniture``."""
+    if not map_id:
+        return data
+    extra = await _fetch_user_furniture(coordinator, str(map_id))
+    if not extra:
+        return data
+    have = [f for f in data.get("furniture") or [] if isinstance(f, dict)]
+    known = {json.dumps(f.get("points"), sort_keys=True) for f in have}
+    new = [f for f in extra if json.dumps(f.get("points"), sort_keys=True) not in known]
+    return {**data, "furniture": have + new}
 
 
 async def _fetch_live_map_cleaning(
@@ -1870,6 +1942,11 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
             if ha_activity in (VacuumActivity.CLEANING, VacuumActivity.RETURNING):
                 live_data = await _fetch_live_map_cleaning(self.coordinator)
                 if live_data:
+                    # No map id in the response -> no user furniture, rather
+                    # than an extra cloud call on every live poll.
+                    live_data = await _with_user_furniture(
+                        self.coordinator, live_data.get("persistentMapId"), live_data
+                    )
                     rotation = int(live_data.get("orientation") or 0)
                     png = _render_live_map_png(
                         live_data,
@@ -1965,6 +2042,9 @@ class DysonFloorPlanImage(DysonEntity, ImageEntity):
                         self.coordinator, clean_id
                     )
                     if fp_data:
+                        fp_data = await _with_user_furniture(
+                            self.coordinator, pmap_id, fp_data
+                        )
                         rotation = int(fp_data.get("orientation") or 0)
                         png = _render_live_map_png(fp_data, rotation)
                         if png is None:
