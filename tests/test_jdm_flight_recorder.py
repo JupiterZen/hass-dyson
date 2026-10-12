@@ -80,7 +80,7 @@ class TestRecorder:
 class TestCoordinatorHook:
     def _coordinator(self, tmp_path):
         coord = MagicMock(spec=DysonDataUpdateCoordinator)
-        coord.serial_number = "7VS-EU-VFA2680A"
+        coord.serial_number = "7VS-EU-TST0001A"
         coord.hass = MagicMock()
         coord.hass.config.path = MagicMock(return_value=str(tmp_path / "x.jsonl"))
         coord._record_jdm = DysonDataUpdateCoordinator._record_jdm.__get__(coord)
@@ -89,7 +89,7 @@ class TestCoordinatorHook:
     def test_records_a_setting_write(self, tmp_path):
         coord = self._coordinator(tmp_path)
         coord._record_jdm(
-            "RB05/7VS-EU-VFA2680A/command/jdm",
+            "RB05/7VS-EU-TST0001A/command/jdm",
             {"method": "prop.set", "params": {"child_lock": 1}},
         )
         row = json.loads((tmp_path / "x.jsonl").read_text())

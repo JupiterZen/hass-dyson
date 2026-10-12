@@ -69,7 +69,7 @@ class TestPostCleanEstimate:
 @pytest.fixture
 def coordinator():
     coord = MagicMock()
-    coord.serial_number = "7VS-EU-VFA2680A"
+    coord.serial_number = "7VS-EU-TST0001A"
     coord.config_entry.entry_id = "entry"
 
     @asynccontextmanager

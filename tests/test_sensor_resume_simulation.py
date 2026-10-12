@@ -28,7 +28,7 @@ def _clear_shared_fetch_cache():
 @pytest.fixture
 def mock_robot_coordinator():
     coordinator = MagicMock()
-    coordinator.serial_number = "7VS-EU-UNA6126A"
+    coordinator.serial_number = "7VS-EU-TST0002A"
     coordinator.device_name = "Robot"
     coordinator.device = MagicMock()
     coordinator.device.robot_state = "FULL_CLEAN_RUNNING"

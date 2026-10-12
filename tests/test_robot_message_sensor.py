@@ -9,7 +9,7 @@ from custom_components.hass_dyson.sensor import DysonRobotMessageSensor
 
 def _sensor(faults):
     coordinator = MagicMock()
-    coordinator.serial_number = "7VS-EU-VFA2680A"
+    coordinator.serial_number = "7VS-EU-TST0001A"
     coordinator.device.robot_active_faults = faults
     sensor = DysonRobotMessageSensor(coordinator)
     sensor.async_write_ha_state = MagicMock()

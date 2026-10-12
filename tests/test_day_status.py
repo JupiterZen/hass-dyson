@@ -187,7 +187,7 @@ def _sensor():
     from custom_components.hass_dyson.sensor import DysonRobotDayStatusSensor
 
     coordinator = MagicMock()
-    coordinator.serial_number = "7VS-EU-VFA2680A"
+    coordinator.serial_number = "7VS-EU-TST0001A"
     coordinator.data = {}
     sensor = DysonRobotDayStatusSensor(coordinator)
     sensor.hass = MagicMock()

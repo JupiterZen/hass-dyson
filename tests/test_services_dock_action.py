@@ -16,7 +16,7 @@ from custom_components.hass_dyson.services import (
     _handle_start_dock_action,
 )
 
-SERIAL = "7VS-EU-UNA6126A"
+SERIAL = "7VS-EU-TST0002A"
 
 
 def _make_coordinator() -> MagicMock:

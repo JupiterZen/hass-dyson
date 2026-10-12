@@ -20,7 +20,7 @@ from custom_components.hass_dyson.select import (
     _ha_device_id_for_serial,
 )
 
-SERIAL = "7VS-EU-VFA2680A"
+SERIAL = "7VS-EU-TST0001A"
 MAP_ID = "1790712695"
 
 

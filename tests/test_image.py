@@ -3470,7 +3470,7 @@ class TestFetchLiveMapMapping:
     @staticmethod
     def _coord(client):
         coordinator = MagicMock()
-        coordinator.serial_number = "7VS-EU-VFA2680A"
+        coordinator.serial_number = "7VS-EU-TST0001A"
 
         @asynccontextmanager
         async def make_client():
@@ -3487,7 +3487,7 @@ class TestFetchLiveMapMapping:
         first = await image_module._fetch_live_map_mapping(coord)
         second = await image_module._fetch_live_map_mapping(coord)
         assert first == second == {"mapData": [1]}
-        client.get_live_map_mapping.assert_awaited_once_with("7VS-EU-VFA2680A")
+        client.get_live_map_mapping.assert_awaited_once_with("7VS-EU-TST0001A")
 
     @pytest.mark.asyncio
     async def test_retries_once_on_429(self):

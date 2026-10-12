@@ -4529,7 +4529,7 @@ class DysonDevice:
         least ``service.get_map_list``, ``service.get_preference``, and
         ``prop.get``/``prop.set``/``prop.post``.
 
-        This was NOT seen on the original robot (7VS-EU-UNA6126A) across
+        This was NOT seen on the original robot (7VS-EU-TST0002A) across
         four earlier capture sessions (see the reply posted to
         thoukydides/matterbridge-dyson-robot#46) — presumably enabled by
         a firmware/app version difference on the replacement unit, not

@@ -38,7 +38,7 @@ def coordinator():
     coord.hass.loop = Mock()
     coord.hass.loop.call_soon_threadsafe = Mock(side_effect=lambda fn: fn())
     coord.async_set_updated_data = Mock()
-    coord.serial_number = "7VS-EU-VFA2680A"
+    coord.serial_number = "7VS-EU-TST0001A"
     coord._store_jdm_service_response = (
         DysonDataUpdateCoordinator._store_jdm_service_response.__get__(coord)
     )
