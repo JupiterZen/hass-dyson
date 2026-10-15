@@ -365,6 +365,23 @@ class TestCoverageEdges:
         assert sw.is_on is True
         assert sw.icon == "mdi:motion-sensor"
 
+    @pytest.mark.asyncio
+    async def test_connection_switch_hands_link_over(self):
+        c = fake_coordinator(FULL_DATA, connected=False)
+        c.is_paused = False
+        c.async_set_paused = AsyncMock()
+        sw = sw_mod.DysonBleVacuumConnectionSwitch(c)
+        assert sw.available is True  # also while the link is released
+        assert sw.is_on is True
+        assert sw.icon == "mdi:bluetooth-connect"
+        await sw.async_turn_off()
+        c.async_set_paused.assert_awaited_with(True)
+        c.is_paused = True
+        assert sw.is_on is False
+        assert sw.icon == "mdi:bluetooth-off"
+        await sw.async_turn_on()
+        c.async_set_paused.assert_awaited_with(False)
+
     def test_setup_branches_run(self):
         hass = MagicMock()
         entry = MagicMock()
@@ -382,8 +399,8 @@ class TestCoverageEdges:
 
         for mod in (sen_mod, bs_mod, sel_mod, sw_mod, upd_mod):
             asyncio.run(run(mod))
-        # 4 sensors + 10 binary sensors + 3 selects + 2 switches + 1 update
-        assert len(added) == 20, [type(e).__name__ for e in added]
+        # 4 sensors + 10 binary sensors + 3 selects + 3 switches + 1 update
+        assert len(added) == 21, [type(e).__name__ for e in added]
 
 
 class TestBatteryCareSwitch:

@@ -1712,6 +1712,128 @@ class TestBleCoordinatorShutdownCleanup:
         coord.ble_device.disconnect.assert_awaited_once()
 
 
+class TestBleVacuumPause:
+    """HA can release the Bluetooth link so the MyDyson app can connect."""
+
+    @staticmethod
+    def _coord(paused=False):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from custom_components.hass_dyson.coordinator import (
+            DysonBLEVacuumDataUpdateCoordinator,
+        )
+
+        with patch(
+            "custom_components.hass_dyson.coordinator.DataUpdateCoordinator.__init__"
+        ):
+            entry = MagicMock()
+            entry.data = {"serial_number": "7RD-EU-TEST0000X", "ble_paused": paused}
+            coord = DysonBLEVacuumDataUpdateCoordinator(MagicMock(), entry)
+        coord.hass = MagicMock()
+        coord.async_update_listeners = MagicMock()
+        coord.ble_device = MagicMock()
+        coord.ble_device.disconnect = AsyncMock()
+        coord.ble_device.connect_and_authenticate = AsyncMock()
+        coord.ble_device.is_connected = False
+        return coord
+
+    def test_paused_flag_is_restored_from_entry(self):
+        assert self._coord(paused=True).is_paused is True
+        assert self._coord(paused=False).is_paused is False
+
+    @pytest.mark.asyncio
+    async def test_pause_disconnects_and_persists(self):
+        coord = self._coord()
+        await coord.async_set_paused(True)
+        assert coord.is_paused is True
+        coord.ble_device.disconnect.assert_awaited_once()
+        update = coord.hass.config_entries.async_update_entry
+        assert update.call_args.kwargs["data"]["ble_paused"] is True
+        assert not coord._resume.is_set()
+
+    @pytest.mark.asyncio
+    async def test_pause_cancels_a_connect_attempt_under_way(self):
+        import asyncio as _asyncio
+
+        coord = self._coord()
+        coord.hass.async_create_background_task = lambda coro, name=None: (
+            _asyncio.ensure_future(coro)
+        )
+        started = _asyncio.Event()
+
+        async def _hangs():
+            started.set()
+            await _asyncio.sleep(3600)
+
+        coord.ble_device.connect_and_authenticate = _hangs
+        coord._ble_task = _asyncio.ensure_future(coord._ble_lifecycle_task())
+        await started.wait()
+        old_task = coord._ble_task
+
+        await _asyncio.wait_for(coord.async_set_paused(True), timeout=2)
+
+        assert old_task.cancelled() or old_task.done()
+        assert coord._ble_task is not old_task  # fresh task, waiting on resume
+        coord._stop_event.set()
+        coord._ble_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_resume_does_not_disconnect(self):
+        coord = self._coord(paused=True)
+        await coord.async_set_paused(False)
+        assert coord.is_paused is False
+        coord.ble_device.disconnect.assert_not_awaited()
+        assert coord._resume.is_set()
+
+    @pytest.mark.asyncio
+    async def test_setting_same_value_is_a_noop(self):
+        coord = self._coord()
+        await coord.async_set_paused(False)
+        coord.hass.config_entries.async_update_entry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_stays_away_while_paused_then_connects(self):
+        import asyncio as _asyncio
+
+        coord = self._coord(paused=True)
+        task = _asyncio.ensure_future(coord._ble_lifecycle_task())
+        await _asyncio.sleep(0.05)
+        coord.ble_device.connect_and_authenticate.assert_not_awaited()
+
+        await coord.async_set_paused(False)
+        await _asyncio.sleep(0.05)
+        coord.ble_device.connect_and_authenticate.assert_awaited()
+        coord._stop_event.set()
+        task.cancel()
+        try:
+            await task
+        except _asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_pause_ends_a_live_keepalive_loop(self):
+        import asyncio as _asyncio
+
+        coord = self._coord()
+        coord.ble_device.is_connected = True
+        coord.ble_device.poll_state = AsyncMock()
+        task = _asyncio.ensure_future(coord._ble_lifecycle_task())
+        await _asyncio.sleep(0.05)
+        coord.ble_device.connect_and_authenticate.assert_awaited_once()
+
+        await coord.async_set_paused(True)
+        coord.ble_device.is_connected = False
+        await _asyncio.sleep(0.05)
+        # No reconnect attempt after the pause, despite the dropped link.
+        coord.ble_device.connect_and_authenticate.assert_awaited_once()
+        coord._stop_event.set()
+        task.cancel()
+        try:
+            await task
+        except _asyncio.CancelledError:
+            pass
+
+
 class TestBleCoordinatorMacResolvedPersistence:
     """A rediscovered BLE MAC (address rotation) must be persisted to the entry.
 

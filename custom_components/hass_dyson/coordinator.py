@@ -3440,6 +3440,16 @@ class DysonBLEVacuumDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]])
         self._cloud_firmware: dict[str, Any] = {}
         self._cloud_firmware_checked_at: float = 0.0
         self._unsub_cloud_firmware: Any | None = None
+        # Manual hand-over of the Bluetooth link.  The vacuum accepts one
+        # connection at a time, so while HA holds it the MyDyson app cannot
+        # connect.  ``_paused`` makes the lifecycle task drop the link and stay
+        # away until it is cleared; it is stored in the config entry so a
+        # restart does not silently take the link back.
+        self._paused: bool = bool(config_entry.data.get("ble_paused", False))
+        self._wake = asyncio.Event()
+        self._resume = asyncio.Event()
+        if not self._paused:
+            self._resume.set()
 
         super().__init__(
             hass,
@@ -3545,6 +3555,52 @@ class DysonBLEVacuumDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]])
         # push happened to arrive afterwards.
         self.hass.async_create_task(self._async_cloud_firmware_tick(None))
 
+    @property
+    def is_paused(self) -> bool:
+        """Return True while the Bluetooth link is deliberately released."""
+        return self._paused
+
+    async def async_set_paused(self, paused: bool) -> None:
+        """Release (``True``) or take back (``False``) the Bluetooth link.
+
+        Pausing disconnects at once so the MyDyson app can connect; the
+        lifecycle task then waits instead of reconnecting.  Resuming lets it
+        reconnect straight away.  The choice is stored in the config entry.
+        """
+        if paused == self._paused:
+            return
+        self._paused = paused
+        self.hass.config_entries.async_update_entry(
+            self._config_entry,
+            data={**self._config_entry.data, "ble_paused": paused},
+        )
+        if paused:
+            self._resume.clear()
+            self._wake.set()
+            # A connection attempt can take minutes (several retries, each with
+            # its own timeout); don't make the app wait for it.  Restarting the
+            # task is safe: it begins by checking the paused flag.
+            task, self._ble_task = self._ble_task, None
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    pass
+            if self.ble_device is not None:
+                await self.ble_device.disconnect()
+            if not self._stop_event.is_set():
+                self._ble_task = self.hass.async_create_background_task(
+                    self._ble_lifecycle_task(),
+                    name=f"dyson-ble-vacuum-{self.serial_number}",
+                )
+        else:
+            self._resume.set()
+            self._wake.set()
+        self.async_update_listeners()
+
     async def async_shutdown(self) -> None:
         """Shut down the coordinator cleanly on config entry unload.
 
@@ -3589,6 +3645,14 @@ class DysonBLEVacuumDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]])
         )
         attempt = 0
         while not self._stop_event.is_set():
+            if self._paused:
+                _LOGGER.info(
+                    "BLE vacuum %s: link released, not connecting until resumed",
+                    mask_serial(self.serial_number),
+                )
+                await self._resume.wait()
+                attempt = 0
+                continue
             if self.ble_device is None:
                 _LOGGER.warning(
                     "BLE vacuum lifecycle: ble_device is None for %s, waiting...",
@@ -3609,8 +3673,20 @@ class DysonBLEVacuumDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]])
                 # the entities (and therefore the device registry entry) were
                 # created — push it into the registry now.
                 self._update_device_registry()
-                while not self._stop_event.is_set() and self.ble_device.is_connected:
-                    await asyncio.sleep(BLE_VACUUM_KEEPALIVE_INTERVAL)
+                while (
+                    not self._stop_event.is_set()
+                    and not self._paused
+                    and self.ble_device.is_connected
+                ):
+                    self._wake.clear()
+                    try:
+                        await asyncio.wait_for(
+                            self._wake.wait(), timeout=BLE_VACUUM_KEEPALIVE_INTERVAL
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    if self._paused:
+                        break
                     if self.ble_device.is_connected:
                         await self.ble_device.poll_state()
                 _LOGGER.info(
@@ -3642,6 +3718,12 @@ class DysonBLEVacuumDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]])
 
             if self._stop_event.is_set():
                 return
+            if self._paused:
+                # A connect that was already under way when the pause came in
+                # may have succeeded; make sure the link is really released.
+                if self.ble_device is not None:
+                    await self.ble_device.disconnect()
+                continue
 
             delay_index = min(attempt, len(BLE_VACUUM_RECONNECT_DELAYS) - 1)
             delay = BLE_VACUUM_RECONNECT_DELAYS[delay_index]

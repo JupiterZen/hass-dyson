@@ -396,6 +396,9 @@
       },
       "ble_vacuum_battery_care_switch": {
         "name": "Battery Care"
+      },
+      "ble_vacuum_connection_switch": {
+        "name": "Bluetooth Connection"
       }
     },
     "button": {

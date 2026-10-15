@@ -42,6 +42,7 @@ async def async_setup_entry(
         [
             DysonBleVacuumTaskDetectionSwitch(coordinator),
             DysonBleVacuumBatteryCareSwitch(coordinator),
+            DysonBleVacuumConnectionSwitch(coordinator),
         ]
     )
     return True
@@ -144,3 +145,57 @@ class DysonBleVacuumBatteryCareSwitch(_BleVacuumSwitchBase):
     def icon(self) -> str:
         """Shield icon reflecting the setting."""
         return "mdi:shield-check" if self.is_on else "mdi:shield-check-outline"
+
+
+class DysonBleVacuumConnectionSwitch(CoordinatorEntity, SwitchEntity):
+    """Hand the Bluetooth link over to the MyDyson app and take it back.
+
+    The vacuum accepts one Bluetooth connection at a time, so while Home
+    Assistant is connected the app cannot reach it.  Turning this off
+    disconnects HA right away and keeps it from reconnecting, turning it on
+    reconnects.  The choice survives a Home Assistant restart.
+    """
+
+    coordinator: DysonBLEVacuumDataUpdateCoordinator
+    _attr_has_entity_name = True
+    _attr_translation_key = "ble_vacuum_connection_switch"
+
+    def __init__(self, coordinator: DysonBLEVacuumDataUpdateCoordinator) -> None:
+        """Initialise the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.serial_number}_ble_connection_switch"
+
+    @property
+    def available(self) -> bool:
+        """Always available: this is the control that restores the link."""
+        return True
+
+    @property
+    def device_info(self):
+        """Return device info for the Home Assistant device registry."""
+        if self.coordinator.ble_device is not None:
+            return self.coordinator.ble_device.device_info
+        return None
+
+    @property
+    def is_on(self) -> bool:
+        """On while Home Assistant holds (or is trying to hold) the link."""
+        return not self.coordinator.is_paused
+
+    @property
+    def icon(self) -> str:
+        """Icon follows the switch state."""
+        return "mdi:bluetooth-connect" if self.is_on else "mdi:bluetooth-off"
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Take the link back and reconnect."""
+        await self.coordinator.async_set_paused(False)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Release the link so the MyDyson app can connect."""
+        await self.coordinator.async_set_paused(True)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Push updates to the frontend."""
+        self.async_write_ha_state()
