@@ -1077,6 +1077,7 @@ BLE_VACUUM_BRUSH_BAR_TYPES: Final = {
     0x12: "soft_dusting_brush",
     0x13: "crevice_tool",
     0x19: "combination_tool",
+    0x20: "flexible_hose",
     0x31: "submarine",
     255: "none_attached",
 }

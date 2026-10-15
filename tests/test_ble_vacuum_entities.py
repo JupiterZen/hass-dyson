@@ -152,6 +152,7 @@ class TestVacuumSensors:
             "soft_dusting_brush",
             "crevice_tool",
             "combination_tool",
+            "flexible_hose",
             "submarine",
             "none_attached",
         ]
