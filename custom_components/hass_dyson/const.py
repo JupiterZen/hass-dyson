@@ -1071,6 +1071,13 @@ BLE_VACUUM_BRUSH_BAR_SPEEDS: Final = {0: "low", 1: "high", 2: "auto"}
 BLE_VACUUM_BRUSH_BAR_TYPES: Final = {
     1: "erp_768",
     2: "row_768",
+    # Measured 15 Oct 2026 on a V16 Piston Animal; none of these are in the
+    # app-derived enum above.  Even plain, motorless tools report a code.
+    6: "mini_motorhead",
+    0x12: "soft_dusting_brush",
+    0x13: "crevice_tool",
+    0x19: "combination_tool",
+    0x31: "submarine",
     255: "none_attached",
 }
 BLE_VACUUM_SESSION_STATES: Final = {0: "inactive", 1: "active"}

@@ -327,6 +327,11 @@
         "state": {
           "erp_768": "Standard head (ERP 768)",
           "row_768": "Wide head (ROW 768)",
+          "mini_motorhead": "Mini motorised tool",
+          "soft_dusting_brush": "Soft dusting brush",
+          "crevice_tool": "Long crevice tool",
+          "combination_tool": "Combination tool",
+          "submarine": "Submarine wet roller head",
           "none_attached": "None attached"
         }
       },

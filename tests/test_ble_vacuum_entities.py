@@ -145,7 +145,16 @@ class TestVacuumSensors:
     def test_enum_normal_label_still_passes(self):
         s = sen_mod.DysonBleVacuumBrushBarTypeSensor(fake_coordinator(FULL_DATA))
         assert s.native_value == "row_768"
-        assert s.options == ["erp_768", "row_768", "none_attached"]
+        assert s.options == [
+            "erp_768",
+            "row_768",
+            "mini_motorhead",
+            "soft_dusting_brush",
+            "crevice_tool",
+            "combination_tool",
+            "submarine",
+            "none_attached",
+        ]
 
 
 # ─── Binary sensors ─────────────────────────────────────────────────────────
