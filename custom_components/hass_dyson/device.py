@@ -4411,10 +4411,13 @@ class DysonDevice:
         - ``"WASH_MOP"`` — the app's "Wassen en drogen" button, observed
           1 second before dockState flipped to WASHING_MOP, and again on
           a deliberate second press.
+        - ``"DRY_MOP"`` — drying only, no wash. Not an app button; tested
+          live once (16 okt 2026): dockState went IDLE -> DRYING_MOP within
+          8 s, on a mop that was already dry.
 
         Args:
-            action: Which dock phase to start. Only ``"COLLECT_DUST"``
-                and ``"WASH_MOP"`` have been confirmed against a real
+            action: Which dock phase to start. ``"COLLECT_DUST"``,
+                ``"WASH_MOP"`` and ``"DRY_MOP"`` have been confirmed against a real
                 robot — any other value is sent as-is but untested and
                 could behave unpredictably.
 

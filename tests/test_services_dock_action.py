@@ -9,9 +9,11 @@ sections, for how these commands were reverse-engineered).
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 from custom_components.hass_dyson.services import (
+    SERVICE_START_DOCK_ACTION_SCHEMA,
     _handle_abort_dock_action,
     _handle_start_dock_action,
 )
@@ -111,6 +113,20 @@ class TestStartDockActionService:
         coordinator.device.robot_start_dock_action.assert_awaited_once_with(
             action="WASH_MOP"
         )
+
+    @pytest.mark.asyncio
+    async def test_dry_mop_action(self):
+        coordinator = _make_coordinator()
+        await _run_start(coordinator, {"device_id": "dev", "action": "DRY_MOP"})
+
+        coordinator.device.robot_start_dock_action.assert_awaited_once_with(
+            action="DRY_MOP"
+        )
+
+    def test_schema_accepts_dry_mop_and_rejects_unknown(self):
+        assert SERVICE_START_DOCK_ACTION_SCHEMA({"device_id": "d", "action": "DRY_MOP"})
+        with pytest.raises(vol.Invalid):
+            SERVICE_START_DOCK_ACTION_SCHEMA({"device_id": "d", "action": "NOPE"})
 
     @pytest.mark.asyncio
     async def test_unknown_device_raises(self):

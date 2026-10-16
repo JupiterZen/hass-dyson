@@ -253,7 +253,7 @@ SERVICE_START_DOCK_ACTION_SCHEMA = vol.Schema(
     {
         vol.Required("device_id"): str,
         vol.Optional("action", default="COLLECT_DUST"): vol.In(
-            ("COLLECT_DUST", "WASH_MOP")
+            ("COLLECT_DUST", "WASH_MOP", "DRY_MOP")
         ),
     }
 )
@@ -981,7 +981,9 @@ async def _handle_start_dock_action(hass: HomeAssistant, call: ServiceCall) -> N
     Mirrors robot_start_dock_action(): action "COLLECT_DUST" is the
     app's "Leeg reservoir" button, "WASH_MOP" is "Wassen en drogen". Both
     confirmed live against a real robot — see
-    dyson/robot-probe/README.md, "OPGELOST" sections.
+    dyson/robot-probe/README.md, "OPGELOST" sections. "DRY_MOP" starts only
+    the drying phase (no wash); it is not an app button, but the robot went
+    IDLE -> DRYING_MOP within 8 s when sent (16 okt 2026, mop already dry).
     """
     device_id = call.data["device_id"]
     action: str = call.data["action"]

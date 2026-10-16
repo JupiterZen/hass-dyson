@@ -303,7 +303,8 @@ start_dock_action:
         Which dock action to start. COLLECT_DUST empties the bin (the
         app's "Leeg reservoir" button); WASH_MOP runs the full
         wash-and-dry cycle from the start (the app's "Wassen en drogen"
-        button), regardless of recent cleaning status.
+        button), regardless of recent cleaning status. DRY_MOP starts only
+        the drying phase, without washing first.
       required: false
       default: COLLECT_DUST
       selector:
@@ -311,3 +312,4 @@ start_dock_action:
           options:
             - COLLECT_DUST
             - WASH_MOP
+            - DRY_MOP
