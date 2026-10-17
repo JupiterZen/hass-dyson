@@ -264,6 +264,57 @@ class TestSetupZoneSettingsSelects:
         assert sum(isinstance(e, DysonRobotZoneMopPassesSelect) for e in added) == 2
 
 
+class TestZoneDiscoveryRetry:
+    """A failed zone fetch at startup (e.g. a Dyson 504) is retried later."""
+
+    @pytest.mark.asyncio
+    async def test_failed_fetch_schedules_retry_and_retries(self):
+        coordinator = _make_coordinator()
+        add_entities = MagicMock()
+        fetch = AsyncMock(side_effect=[None, (MAP_ID, [_zone("13", "Gang")])])
+        with (
+            patch(
+                "custom_components.hass_dyson.services._fetch_zone_settings_for_current_map",
+                fetch,
+            ),
+            patch("custom_components.hass_dyson.select.async_call_later") as later,
+        ):
+            await _async_setup_zone_settings_selects(
+                MagicMock(), MagicMock(), coordinator, add_entities
+            )
+            add_entities.assert_not_called()
+            later.assert_called_once()
+            delay, callback = later.call_args.args[1], later.call_args.args[2]
+            assert delay == 120.0
+
+            await callback(None)
+
+        assert fetch.await_count == 2
+        assert len(add_entities.call_args.args[0]) == 4
+
+    @pytest.mark.asyncio
+    async def test_retries_are_bounded(self):
+        coordinator = _make_coordinator()
+        fetch = AsyncMock(return_value=None)
+        with (
+            patch(
+                "custom_components.hass_dyson.services._fetch_zone_settings_for_current_map",
+                fetch,
+            ),
+            patch("custom_components.hass_dyson.select.async_call_later") as later,
+        ):
+            await _async_setup_zone_settings_selects(
+                MagicMock(), MagicMock(), coordinator, MagicMock()
+            )
+            for _ in range(40):
+                if later.call_count == 0:
+                    break
+                callback = later.call_args.args[2]
+                later.reset_mock()
+                await callback(None)
+        assert fetch.await_count == 16  # first attempt + 15 retries
+
+
 class TestZoneMopPassesSelect:
     def test_decodes_one_and_two(self):
         one = DysonRobotZoneMopPassesSelect(

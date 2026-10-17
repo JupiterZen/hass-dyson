@@ -68,6 +68,9 @@ from .device_utils import mask_email, mask_serial
 
 _LOGGER = logging.getLogger(__name__)
 
+# Longest a robot's initial refresh waits for its first CURRENT-STATE.
+ROBOT_FIRST_STATE_TIMEOUT: Final = 30.0
+
 # How long a configured host may fail, with the cloud fallback in use, before
 # a repair issue is raised. Long enough to ride out a device reboot or a wifi
 # blip, short enough that a stale static address is noticed the same day.
@@ -1964,6 +1967,33 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Sticker discovery method temporarily disabled - use cloud discovery instead"
         )
 
+    async def _async_wait_for_robot_first_state(self) -> None:
+        """Hold the initial refresh until a robot has sent its first state.
+
+        Robot sensors, selects and switches are only created when the keys
+        they show (``dockState``, ``consumables``, ...) are already in the
+        data at platform setup. After a Pi reboot on 16 Oct 2026 the robot's
+        first CURRENT-STATE arrived after setup (Dyson cloud answered 504s),
+        so ~60 entities were never created and stayed ``unavailable`` for
+        27 hours. Waiting here, bounded, closes that race; on a timeout setup
+        carries on as before.
+        """
+        if not self.device:
+            return
+        await self.device.send_command(MQTT_CMD_REQUEST_CURRENT_STATE)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + ROBOT_FIRST_STATE_TIMEOUT
+        while loop.time() < deadline:
+            if self.device.robot_state is not None:
+                _LOGGER.debug("Robot %s sent its first state", self.serial_number)
+                return
+            await asyncio.sleep(0.5)
+        _LOGGER.warning(
+            "Robot %s sent no state within %.0f s; setting up entities without it",
+            self.serial_number,
+            ROBOT_FIRST_STATE_TIMEOUT,
+        )
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Update data from the device - mainly for connectivity checks."""
         if not self.device:
@@ -2035,6 +2065,9 @@ class DysonDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Completed wait for initial state messages from %s",
                         self.serial_number,
                     )
+
+                if "robot" in self.device_category:
+                    await self._async_wait_for_robot_first_state()
 
             # Get current device state (from last received MQTT message)
             device_state = await self.device.get_state()

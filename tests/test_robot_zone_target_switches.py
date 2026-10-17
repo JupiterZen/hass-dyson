@@ -148,6 +148,31 @@ class TestZoneTargetSwitchDiscovery:
             )  # should not raise
 
 
+class TestZoneTargetSwitchDiscoveryRetry:
+    @pytest.mark.asyncio
+    async def test_fetch_failure_schedules_retry(
+        self, mock_hass, mock_config_entry, mock_coordinator
+    ):
+        """A failed fetch at setup is retried instead of waiting for a broadcast."""
+        mock_add = MagicMock()
+        fetch = AsyncMock(side_effect=[Exception("504"), [_FAKE_PMAP]])
+        with (
+            patch(
+                "custom_components.hass_dyson.services._fetch_persistent_map_metadata",
+                fetch,
+            ),
+            patch("custom_components.hass_dyson.switch.async_call_later") as later,
+        ):
+            await switch_setup_entry(mock_hass, mock_config_entry, mock_add)
+            later.assert_called_once()
+            assert later.call_args.args[1] == 120.0
+            await later.call_args.args[2](None)
+
+        assert fetch.await_count == 2
+        all_added = [e for call in mock_add.call_args_list for e in call[0][0]]
+        assert any(isinstance(e, DysonRobotZoneTargetSwitch) for e in all_added)
+
+
 class TestZoneTargetSwitchEntity:
     def test_unique_id_is_map_qualified(self, mock_coordinator):
         zone = _FAKE_PMAP.zones[1]

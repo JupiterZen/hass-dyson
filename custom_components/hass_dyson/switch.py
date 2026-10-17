@@ -29,6 +29,11 @@ from .entity import DysonBLEEntity, DysonEntity
 # broadcast, no reason for the debounce windows to differ.
 _ZONE_SWITCH_MANIFEST_REFRESH_DEBOUNCE: float = 5.0
 
+# A failed zone discovery (cloud error at startup) is retried this often, this
+# many times, so the zone entities appear without waiting for a broadcast.
+_ZONE_DISCOVERY_RETRY_DELAY: float = 120.0
+_ZONE_DISCOVERY_MAX_RETRIES: int = 15
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -175,8 +180,10 @@ async def _async_setup_zone_target_switches(
                 coordinator.serial_number,
                 err,
             )
+            _schedule_retry()
             return
         if not maps:
+            _schedule_retry()
             return
         pmap = _effective_current_map(maps, coordinator) or maps[0]
 
@@ -211,6 +218,31 @@ async def _async_setup_zone_target_switches(
     manifest_refresh_unsub: CALLBACK_TYPE | None = None
     manifest_listener_removed = False
 
+    retry_unsub: CALLBACK_TYPE | None = None
+    retries_left = _ZONE_DISCOVERY_MAX_RETRIES
+
+    async def _async_retry(_now) -> None:
+        nonlocal retry_unsub
+        retry_unsub = None
+        await _async_discover()
+
+    def _schedule_retry() -> None:
+        """Try discovery again after a failed fetch (e.g. a 504 at startup).
+
+        Without this a failed first fetch left every zone entity uncreated
+        until the robot happened to broadcast a manifest update.
+        """
+        nonlocal retry_unsub, retries_left
+        if manifest_listener_removed or retry_unsub is not None or retries_left <= 0:
+            return
+        retries_left -= 1
+        try:
+            retry_unsub = async_call_later(
+                hass, _ZONE_DISCOVERY_RETRY_DELAY, _async_retry
+            )
+        except Exception:  # noqa: BLE001 — a missing retry must not break setup
+            _LOGGER.debug("Could not schedule zone discovery retry", exc_info=True)
+
     async def _async_manifest_refresh(_now) -> None:
         nonlocal manifest_refresh_unsub
         manifest_refresh_unsub = None
@@ -244,6 +276,8 @@ async def _async_setup_zone_target_switches(
             device.remove_message_callback(_on_device_message)
             if manifest_refresh_unsub is not None:
                 manifest_refresh_unsub()
+            if retry_unsub is not None:
+                retry_unsub()
 
         config_entry.async_on_unload(_remove_manifest_listener)
 
