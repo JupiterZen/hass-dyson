@@ -27,6 +27,7 @@ from .const import (
 from .coordinator import DysonBLEDataUpdateCoordinator, DysonDataUpdateCoordinator
 from .device_utils import mask_serial
 from .entity import DysonBLEEntity, DysonEntity
+from .robot_late_entities import async_robot_state_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -120,6 +121,19 @@ def _is_fault_code_for_capability(
     return False
 
 
+def _robot_state_binary_sensors(coordinator: DysonDataUpdateCoordinator) -> list[Any]:
+    """Robot binary sensors that exist only once their state key was reported."""
+    # Cleaning solution refill sensor — only for models that report it
+    # (hot-water-mop robots); the consumables entry is absent otherwise.
+    consumables = (coordinator.data or {}).get("consumables")
+    if isinstance(consumables, list) and any(
+        isinstance(entry, dict) and entry.get("type") == "cleaningSolution"
+        for entry in consumables
+    ):
+        return [DysonCleaningSolutionSensor(coordinator)]
+    return []
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -197,18 +211,14 @@ async def async_setup_entry(
             entities.append(DysonRobotActionRequiredSensor(coordinator))
         _LOGGER.debug("Adding robot charging sensor for %s", coordinator.serial_number)
 
-        # Cleaning solution refill sensor — only for models that report it
-        # (hot-water-mop robots); the consumables entry is absent otherwise.
-        robot_state_data = coordinator.data or {}
-        consumables = robot_state_data.get("consumables")
-        if isinstance(consumables, list) and any(
-            isinstance(entry, dict) and entry.get("type") == "cleaningSolution"
-            for entry in consumables
-        ):
-            entities.append(DysonCleaningSolutionSensor(coordinator))
-            _LOGGER.debug(
-                "Adding cleaning solution sensor for %s", coordinator.serial_number
+        entities.extend(
+            async_robot_state_entities(
+                config_entry,
+                coordinator,
+                async_add_entities,
+                lambda: _robot_state_binary_sensors(coordinator),
             )
+        )
 
     async_add_entities(entities, True)
     return True

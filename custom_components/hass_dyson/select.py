@@ -26,6 +26,7 @@ from .const import (
 from .coordinator import DysonDataUpdateCoordinator
 from .device_utils import mask_serial
 from .entity import DysonEntity
+from .robot_late_entities import async_robot_state_entities
 from .spot_scrub_select import DysonSpotScrubCleaningModeSelect
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,6 +58,19 @@ _ZONE_CLEANING_STRATEGY_OPTIONS = ("auto", "quick", "quiet", "boost")
 # The app's "1x of 2x dweilen"; ``mopPasses`` 1 and 2 are the only values seen.
 _ZONE_MOP_PASSES_OPTIONS: dict[str, int] = {"1x dweilen": 1, "2x dweilen": 2}
 _ZONE_UV_SCAN_OPTIONS: dict[str, bool] = {"aan": True, "uit": False}
+
+
+def _robot_state_selects(coordinator: DysonDataUpdateCoordinator) -> list[Any]:
+    """Robot selects that exist only once their state key has been reported."""
+    data = coordinator.data
+    entities: list[Any] = []
+    # Self-clean interval — only for docks that have reported backWashType.
+    if data and "backWashType" in data:
+        entities.append(DysonRobotSelfCleanIntervalSelect(coordinator))
+    # Voice language — only for docks that have reported voiceLanguage.
+    if data and "voiceLanguage" in data:
+        entities.append(DysonRobotVoiceLanguageSelect(coordinator))
+    return entities
 
 
 async def async_setup_entry(
@@ -122,16 +136,14 @@ async def async_setup_entry(
             )
             entities.append(DysonRobotPowerGenericSelect(coordinator))
 
-        # Self-clean interval — only for docks that have reported
-        # backWashType at least once (matching the switch/sensor gates
-        # elsewhere in this integration for the same field family).
-        if coordinator.data and "backWashType" in coordinator.data:
-            entities.append(DysonRobotSelfCleanIntervalSelect(coordinator))
-
-        # Voice language — only for docks that have reported voiceLanguage
-        # at least once.
-        if coordinator.data and "voiceLanguage" in coordinator.data:
-            entities.append(DysonRobotVoiceLanguageSelect(coordinator))
+        entities.extend(
+            async_robot_state_entities(
+                config_entry,
+                coordinator,
+                async_add_entities,
+                lambda: _robot_state_selects(coordinator),
+            )
+        )
 
     is_robot = isinstance(device_categories, list) and any(
         cat == DEVICE_CATEGORY_ROBOT for cat in device_categories

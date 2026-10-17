@@ -92,6 +92,7 @@ from .coordinator import DysonDataUpdateCoordinator, TTLCache
 from .device_utils import mask_serial
 from .entity import DysonEntity
 from .image import _fetch_live_map_cleaning
+from .robot_late_entities import async_robot_state_entities
 from .vacuum import _clean_maps_cache, fetch_clean_maps
 
 _LOGGER = logging.getLogger(__name__)
@@ -1104,6 +1105,38 @@ def _register_end_of_clean_listener(
     config_entry.async_on_unload(_remove_listener)
 
 
+def _robot_state_sensors(coordinator: DysonDataUpdateCoordinator) -> list[Any]:
+    """Robot sensors that exist only once their state key has been reported."""
+    entities: list[Any] = []
+    data = coordinator.data
+    # Wash/dry dock status — only docks that support it ever send
+    # dockState, so gate on having seen the key at least once
+    # rather than creating a permanently-unknown entity for
+    # robots on a plain charging dock.
+    if data and "dockState" in data:
+        entities.append(DysonRobotDockStateSensor(coordinator))
+    # Mop-wash cycle length — same "only if ever reported" gate.
+    # backWashTime and backWashType are no longer separate sensors:
+    # they are the two halves of the app's single "Zelfreinigings-
+    # interval" setting, now select.robot_self_clean_interval.
+    if data and "backWashFrequency" in data:
+        entities.append(DysonRobotBackWashFrequencySensor(coordinator))
+    if data and "fullCleanAction" in data:
+        entities.append(DysonRobotFullCleanActionSensor(coordinator))
+    if data and "cleaningState" in data:
+        entities.append(DysonRobotCleaningStateSensor(coordinator))
+    # One sensor per part type actually reported in consumables[]
+    # rather than a hardcoded list, so this adapts if a robot
+    # model reports a different set of parts.
+    consumables = data.get("consumables") if data else None
+    if isinstance(consumables, list):
+        for entry in consumables:
+            part_type = entry.get("type") if isinstance(entry, dict) else None
+            if part_type:
+                entities.append(DysonRobotConsumableSensor(coordinator, part_type))
+    return entities
+
+
 async def async_setup_entry(  # noqa: C901
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1515,41 +1548,17 @@ async def async_setup_entry(  # noqa: C901
                 device_serial,
             )
             entities.append(DysonRobotBatterySensor(coordinator))
-            # Wash/dry dock status — only docks that support it ever send
-            # dockState, so gate on having seen the key at least once
-            # rather than creating a permanently-unknown entity for
-            # robots on a plain charging dock.
-            if coordinator.data and "dockState" in coordinator.data:
-                _LOGGER.debug(
-                    "Adding dock state sensor for robot device %s",
-                    device_serial,
+            # Sensors gated on keys the robot has reported (dockState,
+            # consumables, ...). Re-evaluated when the robot's first state
+            # arrives after setup, see robot_late_entities.
+            entities.extend(
+                async_robot_state_entities(
+                    config_entry,
+                    coordinator,
+                    async_add_entities,
+                    lambda: _robot_state_sensors(coordinator),
                 )
-                entities.append(DysonRobotDockStateSensor(coordinator))
-            # Mop-wash cycle length — same "only if ever reported" gate.
-            # Docks without a wash cycle never send this. backWashTime and
-            # backWashType are no longer separate sensors: verified 1 sep
-            # 2026 as the two halves of the app's single "Zelfreinigings-
-            # interval" setting, now select.robot_self_clean_interval in
-            # select.py.
-            if coordinator.data and "backWashFrequency" in coordinator.data:
-                entities.append(DysonRobotBackWashFrequencySensor(coordinator))
-            if coordinator.data and "fullCleanAction" in coordinator.data:
-                entities.append(DysonRobotFullCleanActionSensor(coordinator))
-            if coordinator.data and "cleaningState" in coordinator.data:
-                entities.append(DysonRobotCleaningStateSensor(coordinator))
-            # One sensor per part type actually reported in consumables[]
-            # rather than a hardcoded list, so this adapts if a robot
-            # model reports a different set of parts.
-            consumables = (
-                coordinator.data.get("consumables") if coordinator.data else None
             )
-            if isinstance(consumables, list):
-                for entry in consumables:
-                    part_type = entry.get("type") if isinstance(entry, dict) else None
-                    if part_type:
-                        entities.append(
-                            DysonRobotConsumableSensor(coordinator, part_type)
-                        )
             # Voice download status has no CURRENT-STATE key of its own to
             # gate on (it's pushed independently) — create unconditionally
             # for robot devices, stays unavailable until the first

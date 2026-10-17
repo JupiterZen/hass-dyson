@@ -22,6 +22,7 @@ from .const import (
 from .coordinator import DysonBLEDataUpdateCoordinator, DysonDataUpdateCoordinator
 from .device_utils import mask_serial
 from .entity import DysonBLEEntity, DysonEntity
+from .robot_late_entities import async_robot_state_entities
 
 # Coalescing delay (seconds) between the robot's PERSISTENT-MAP-MANIFEST-
 # UPDATED broadcast and the zone-target-switch metadata re-fetch it triggers.
@@ -35,6 +36,29 @@ _ZONE_DISCOVERY_RETRY_DELAY: float = 120.0
 _ZONE_DISCOVERY_MAX_RETRIES: int = 15
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _robot_state_switches(coordinator: DysonDataUpdateCoordinator) -> list[Any]:
+    """Robot switches that exist only once their state key has been reported."""
+    data = coordinator.data or {}
+    entities: list[Any] = []
+    if "childLock" in data:
+        entities.append(DysonRobotChildLockSwitch(coordinator))
+    if "washMopBeforeClean" in data:
+        entities.append(DysonRobotWashMopBeforeCleanSwitch(coordinator))
+    if "doNotDisturbMode" in data:
+        entities.append(DysonRobotDoNotDisturbSwitch(coordinator))
+    if "hotWaterSwitch" in data:
+        entities.append(DysonRobotHotWaterSwitchSwitch(coordinator))
+    if "alarm" in data:
+        entities.append(DysonRobotAlarmSwitch(coordinator))
+    if "detergent" in data:
+        entities.append(DysonRobotDetergentSwitch(coordinator))
+    if "hotWaterMop" in data:
+        entities.append(DysonRobotHotWaterMopSwitch(coordinator))
+    if "collectDustOnSelfClean" in data:
+        entities.append(DysonRobotCollectDustOnSelfCleanSwitch(coordinator))
+    return entities
 
 
 async def async_setup_entry(
@@ -112,22 +136,14 @@ async def async_setup_entry(
         any(cat == DEVICE_CATEGORY_ROBOT for cat in device_category)
         and coordinator.data
     ):
-        if "childLock" in coordinator.data:
-            entities.append(DysonRobotChildLockSwitch(coordinator))
-        if "washMopBeforeClean" in coordinator.data:
-            entities.append(DysonRobotWashMopBeforeCleanSwitch(coordinator))
-        if "doNotDisturbMode" in coordinator.data:
-            entities.append(DysonRobotDoNotDisturbSwitch(coordinator))
-        if "hotWaterSwitch" in coordinator.data:
-            entities.append(DysonRobotHotWaterSwitchSwitch(coordinator))
-        if "alarm" in coordinator.data:
-            entities.append(DysonRobotAlarmSwitch(coordinator))
-        if "detergent" in coordinator.data:
-            entities.append(DysonRobotDetergentSwitch(coordinator))
-        if "hotWaterMop" in coordinator.data:
-            entities.append(DysonRobotHotWaterMopSwitch(coordinator))
-        if "collectDustOnSelfClean" in coordinator.data:
-            entities.append(DysonRobotCollectDustOnSelfCleanSwitch(coordinator))
+        entities.extend(
+            async_robot_state_entities(
+                config_entry,
+                coordinator,
+                async_add_entities,
+                lambda: _robot_state_switches(coordinator),
+            )
+        )
 
         # Voice notifications toggle (separate "jdm" protocol, see
         # DysonRobotVoiceNotificationsSwitch) — unlike the switches above,

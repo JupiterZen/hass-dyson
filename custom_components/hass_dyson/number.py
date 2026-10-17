@@ -15,8 +15,20 @@ from .const import DEVICE_CATEGORY_ROBOT, DOMAIN
 from .coordinator import DysonDataUpdateCoordinator
 from .device_utils import mask_serial
 from .entity import DysonEntity
+from .robot_late_entities import async_robot_state_entities
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _robot_state_numbers(coordinator: DysonDataUpdateCoordinator) -> list[Any]:
+    """Robot numbers that exist only once their state key has been reported."""
+    data = coordinator.data
+    entities: list[Any] = []
+    if data and "airDryFrequency" in data:
+        entities.append(DysonRobotAirDryFrequencyNumber(coordinator))
+        if "volume" in data:
+            entities.append(DysonRobotVolumeNumber(coordinator))
+    return entities
 
 
 async def async_setup_entry(
@@ -60,14 +72,15 @@ async def async_setup_entry(
     # reported airDryFrequency at least once (matching the gate used for
     # the other robot dock fields elsewhere in this integration).
     device_categories = coordinator.device_category or []
-    if (
-        any(cat == DEVICE_CATEGORY_ROBOT for cat in device_categories)
-        and coordinator.data
-        and "airDryFrequency" in coordinator.data
-    ):
-        entities.append(DysonRobotAirDryFrequencyNumber(coordinator))
-        if "volume" in coordinator.data:
-            entities.append(DysonRobotVolumeNumber(coordinator))
+    if any(cat == DEVICE_CATEGORY_ROBOT for cat in device_categories):
+        entities.extend(
+            async_robot_state_entities(
+                config_entry,
+                coordinator,
+                async_add_entities,
+                lambda: _robot_state_numbers(coordinator),
+            )
+        )
 
     async_add_entities(entities, True)
 
