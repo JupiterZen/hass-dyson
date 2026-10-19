@@ -198,16 +198,17 @@ set_zone_behaviour:
             - boost
     clean_type:
       name: Clean Type
-      description: Whether to vacuum only, or vacuum and mop this zone.
+      description: Whether to vacuum only, mop only, or vacuum and mop this zone.
       required: false
       selector:
         select:
           options:
             - vacuum
             - vacuumAndMop
+            - mop
     water_level:
       name: Water Level
-      description: Mop water level for this zone (only relevant with vacuumAndMop).
+      description: Mop water level for this zone (only relevant with vacuumAndMop or mop).
       required: false
       selector:
         select:

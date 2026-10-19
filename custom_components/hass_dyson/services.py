@@ -217,7 +217,7 @@ SERVICE_START_ZONE_CLEAN_SCHEMA = vol.Schema(
 # traffic. Confirmed wrong 30 sep 2026 once a live app session was
 # captured making an actual settings change.
 _ZONE_CLEANING_STRATEGIES = ("auto", "quick", "quiet", "boost")
-_ZONE_CLEAN_TYPES = ("vacuum", "vacuumAndMop")
+_ZONE_CLEAN_TYPES = ("vacuum", "vacuumAndMop", "mop")
 _ZONE_WATER_LEVELS = ("veryLow", "low", "medium", "high")
 SERVICE_SET_ZONE_BEHAVIOUR_SCHEMA = vol.Schema(
     {

@@ -391,3 +391,71 @@ class TestZoneUvScanSelect:
             {"device_id": "dev1", "zone": "13", "map": MAP_ID, "uv_scan": False},
             blocking=True,
         )
+
+
+class TestMopOnlyCleanType:
+    """The app's "alleen dweilen" is cloud cleanType ``mop`` (seen 19 okt 2026)."""
+
+    def test_decodes_mop_with_water_level(self):
+        zone = _zone("14", "Keuken", cleanType="mop", waterLevel="low")
+        entity = DysonRobotZoneCleanTypeSelect(_make_coordinator(), MAP_ID, zone)
+        assert entity._attr_current_option == "Alleen dweilen (laag water)"
+        assert "Alleen dweilen (hoog water)" in entity._attr_options
+
+    @pytest.mark.asyncio
+    async def test_select_mop_sends_clean_type_and_water(self):
+        entity = DysonRobotZoneCleanTypeSelect(
+            _make_coordinator(), MAP_ID, _zone("14", "Keuken")
+        )
+        entity.hass = MagicMock()
+        entity.hass.services.async_call = AsyncMock()
+        entity.async_write_ha_state = MagicMock()
+        with patch(
+            "custom_components.hass_dyson.select._ha_device_id_for_serial",
+            return_value="ha-device-id",
+        ):
+            await entity.async_select_option("Alleen dweilen (gemiddeld water)")
+        data = entity.hass.services.async_call.await_args.args[2]
+        assert data["clean_type"] == "mop"
+        assert data["water_level"] == "medium"
+
+
+class TestZoneSelectRefreshTriggers:
+    """App-side changes (no manifest broadcast) still refresh the selects."""
+
+    @pytest.mark.asyncio
+    async def test_jdm_set_preference_triggers_refresh_and_state_follows(self):
+        coordinator = _make_coordinator()
+        hass = MagicMock()
+        hass.loop.call_soon_threadsafe.side_effect = lambda fn, *a: fn(*a)
+        entry = MagicMock()
+        add_entities = MagicMock()
+        fetch = AsyncMock(
+            side_effect=[
+                (MAP_ID, [_zone("14", "Keuken")]),
+                (MAP_ID, [_zone("14", "Keuken", cleanType="mop")]),
+            ]
+        )
+        with (
+            patch(
+                "custom_components.hass_dyson.services._fetch_zone_settings_for_current_map",
+                fetch,
+            ),
+            patch("custom_components.hass_dyson.select.async_call_later") as later,
+            patch("custom_components.hass_dyson.select.async_track_time_interval"),
+        ):
+            await _async_setup_zone_settings_selects(
+                hass, entry, coordinator, add_entities
+            )
+            clean_type = add_entities.call_args.args[0][0]
+            assert clean_type._attr_current_option == "Alleen stofzuigen"
+
+            on_message = coordinator.device.add_message_callback.call_args.args[0]
+            on_message("RB05/7VS/status/jdm", {"method": "event.clean_record.post"})
+            later.assert_not_called()  # unrelated jdm traffic is ignored
+
+            on_message("RB05/7VS/command/jdm", {"method": "service.set_preference"})
+            later.assert_called_once()
+            await later.call_args.args[2](None)
+
+        assert clean_type._attr_current_option == "Alleen dweilen (laag water)"

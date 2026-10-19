@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.select import SelectEntity
@@ -12,7 +13,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 from .const import (
     DEVICE_CATEGORY_ROBOT,
@@ -45,15 +46,26 @@ _ZONE_DISCOVERY_MAX_RETRIES: int = 15
 # is also how the MyDyson app presents it (one picker, not two). The
 # "veryLow"/"low"/"medium"/"high" water levels and "vacuum"/"vacuumAndMop"
 # clean types are observed on the wire ("veryLow" = "zeer laag", from the app
-# on 6 okt 2026, the others from the 2026-09-30 captures); no other
-# combinations confirmed.
+# on 6 okt 2026, the others from the 2026-09-30 captures). "mop" (the app's
+# "alleen dweilen", jdm cleanType 2) was captured on 19 okt 2026; its water
+# levels are assumed to be the same four as with vacuumAndMop.
 _ZONE_CLEAN_TYPE_OPTIONS: dict[str, tuple[str, str | None]] = {
     "Alleen stofzuigen": ("vacuum", None),
     "Stofzuigen + dweilen (zeer laag water)": ("vacuumAndMop", "veryLow"),
     "Stofzuigen + dweilen (laag water)": ("vacuumAndMop", "low"),
     "Stofzuigen + dweilen (gemiddeld water)": ("vacuumAndMop", "medium"),
     "Stofzuigen + dweilen (hoog water)": ("vacuumAndMop", "high"),
+    "Alleen dweilen (zeer laag water)": ("mop", "veryLow"),
+    "Alleen dweilen (laag water)": ("mop", "low"),
+    "Alleen dweilen (gemiddeld water)": ("mop", "medium"),
+    "Alleen dweilen (hoog water)": ("mop", "high"),
 }
+
+# The zone settings change in the MyDyson app without any manifest broadcast, so
+# besides that broadcast the selects also refresh when a jdm ``set_preference``
+# goes by (the app's own change) and on this slow timer as a safety net.
+_ZONE_SELECT_PERIODIC_REFRESH = timedelta(minutes=10)
+_JDM_SETTINGS_METHODS = ("service.set_preference",)
 _ZONE_CLEANING_STRATEGY_OPTIONS = ("auto", "quick", "quiet", "boost")
 # The app's "1x of 2x dweilen"; ``mopPasses`` 1 and 2 are the only values seen.
 _ZONE_MOP_PASSES_OPTIONS: dict[str, int] = {"1x dweilen": 1, "2x dweilen": 2}
@@ -318,9 +330,15 @@ async def _async_setup_zone_settings_selects(
         )
 
     def _on_device_message(topic: str, data: dict[str, Any]) -> None:
-        if data.get("msg") != ROBOT_MSG_MAP_MANIFEST_UPDATED:
+        if data.get("msg") != ROBOT_MSG_MAP_MANIFEST_UPDATED and not (
+            topic.endswith(("/command/jdm", "/status/jdm"))
+            and data.get("method") in _JDM_SETTINGS_METHODS
+        ):
             return
         hass.loop.call_soon_threadsafe(_schedule_manifest_refresh)
+
+    async def _async_periodic_refresh(_now) -> None:
+        await _async_manifest_refresh(_now)
 
     device = coordinator.device
     if device is not None:
@@ -336,6 +354,14 @@ async def _async_setup_zone_settings_selects(
                 retry_unsub()
 
         config_entry.async_on_unload(_remove_manifest_listener)
+        try:
+            config_entry.async_on_unload(
+                async_track_time_interval(
+                    hass, _async_periodic_refresh, _ZONE_SELECT_PERIODIC_REFRESH
+                )
+            )
+        except Exception:  # noqa: BLE001 — the periodic refresh is only a safety net
+            _LOGGER.debug("Could not schedule periodic zone refresh", exc_info=True)
 
     await _async_discover()
 
