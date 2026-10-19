@@ -16,6 +16,7 @@ from custom_components.hass_dyson.select import (
     DysonRobotZoneCleanTypeSelect,
     DysonRobotZoneMopPassesSelect,
     DysonRobotZoneUvScanSelect,
+    DysonRobotZoneWaterLevelSelect,
     _async_setup_zone_settings_selects,
     _ha_device_id_for_serial,
 )
@@ -45,36 +46,91 @@ def _make_coordinator() -> MagicMock:
 
 
 class TestZoneCleanTypeSelectStateDecoding:
-    """Test state decoding from a zone's settings dict."""
+    """The app's four-way "reinigingstype" picker."""
 
-    def test_vacuum_only(self):
-        zone = _zone("13", "Gang", cleanType="vacuum", waterLevel="low")
-        entity = DysonRobotZoneCleanTypeSelect(_make_coordinator(), MAP_ID, zone)
-        assert entity._attr_current_option == "Alleen stofzuigen"
-
-    def test_vacuum_and_mop_high_water(self):
-        zone = _zone(
-            "13", "Gang", cleanType="vacuumAndMop", waterLevel="high", mopPasses=2
+    @pytest.mark.parametrize(
+        ("clean_type", "label"),
+        [
+            ("vacuum", "Stofzuigen"),
+            ("vacuumAndMop", "Stofzuigen en dweilen"),
+            ("mop", "Dweilen"),
+            ("vacuumThenMop", "Stofzuigen, dan dweilen"),
+        ],
+    )
+    def test_decodes_each_clean_type(self, clean_type, label):
+        entity = DysonRobotZoneCleanTypeSelect(
+            _make_coordinator(), MAP_ID, _zone("14", "Keuken", cleanType=clean_type)
         )
-        entity = DysonRobotZoneCleanTypeSelect(_make_coordinator(), MAP_ID, zone)
-        assert entity._attr_current_option == "Stofzuigen + dweilen (hoog water)"
+        assert entity._attr_current_option == label
+        assert entity._attr_name == "Keuken reinigingstype"
 
-    def test_very_low_water_decodes_to_the_new_option(self):
-        zone = _zone("14", "Keuken", cleanType="vacuumAndMop", waterLevel="veryLow")
-        entity = DysonRobotZoneCleanTypeSelect(_make_coordinator(), MAP_ID, zone)
-        assert entity._attr_current_option == "Stofzuigen + dweilen (zeer laag water)"
-        assert "Stofzuigen + dweilen (zeer laag water)" in entity._attr_options
+    def test_has_exactly_the_four_app_options(self):
+        entity = DysonRobotZoneCleanTypeSelect(
+            _make_coordinator(), MAP_ID, _zone("14", "Keuken")
+        )
+        assert entity._attr_options == [
+            "Stofzuigen en dweilen",
+            "Stofzuigen",
+            "Dweilen",
+            "Stofzuigen, dan dweilen",
+        ]
 
-    def test_unrecognised_combination_is_none(self):
-        zone = _zone("13", "Gang", cleanType="vacuumAndMop", waterLevel="turbo")
-        entity = DysonRobotZoneCleanTypeSelect(_make_coordinator(), MAP_ID, zone)
+    def test_unknown_clean_type_is_none(self):
+        entity = DysonRobotZoneCleanTypeSelect(
+            _make_coordinator(), MAP_ID, _zone("14", "Keuken", cleanType="warp")
+        )
         assert entity._attr_current_option is None
 
     def test_name_falls_back_to_zone_id(self):
-        zone = _zone("13", "")
-        zone["name"] = None
-        entity = DysonRobotZoneCleanTypeSelect(_make_coordinator(), MAP_ID, zone)
-        assert entity.zone_name == "Zone 13"
+        entity = DysonRobotZoneCleanTypeSelect(
+            _make_coordinator(), MAP_ID, {"id": "99", "settings": {}}
+        )
+        assert entity._attr_name == "Zone 99 reinigingstype"
+
+    def test_unique_id_unchanged_from_before_the_split(self):
+        entity = DysonRobotZoneCleanTypeSelect(
+            _make_coordinator(), MAP_ID, _zone("14", "Keuken")
+        )
+        assert entity._attr_unique_id == f"{SERIAL}_zone_clean_type_{MAP_ID}_14"
+
+
+class TestZoneWaterLevelSelect:
+    @pytest.mark.parametrize(
+        ("level", "label"),
+        [
+            ("veryLow", "zeer laag"),
+            ("low", "laag"),
+            ("medium", "gemiddeld"),
+            ("high", "hoog"),
+        ],
+    )
+    def test_decodes_each_level(self, level, label):
+        entity = DysonRobotZoneWaterLevelSelect(
+            _make_coordinator(), MAP_ID, _zone("14", "Keuken", waterLevel=level)
+        )
+        assert entity._attr_current_option == label
+        assert entity._attr_name == "Keuken waterniveau"
+
+    @pytest.mark.asyncio
+    async def test_select_sends_only_the_water_level(self):
+        entity = DysonRobotZoneWaterLevelSelect(
+            _make_coordinator(), MAP_ID, _zone("14", "Keuken")
+        )
+        entity.hass = MagicMock()
+        entity.hass.services.async_call = AsyncMock()
+        entity.async_write_ha_state = MagicMock()
+        with patch(
+            "custom_components.hass_dyson.select._ha_device_id_for_serial",
+            return_value="ha-device-id",
+        ):
+            await entity.async_select_option("hoog")
+        data = entity.hass.services.async_call.await_args.args[2]
+        assert data == {
+            "device_id": "ha-device-id",
+            "zone": "14",
+            "map": MAP_ID,
+            "water_level": "high",
+        }
 
 
 class TestZoneCleaningStrategySelectStateDecoding:
@@ -90,11 +146,19 @@ class TestZoneCleaningStrategySelectStateDecoding:
 
 
 class TestZoneCleanTypeSelectOption:
+    @pytest.mark.parametrize(
+        ("label", "clean_type"),
+        [
+            ("Stofzuigen", "vacuum"),
+            ("Dweilen", "mop"),
+            ("Stofzuigen en dweilen", "vacuumAndMop"),
+            ("Stofzuigen, dan dweilen", "vacuumThenMop"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_select_very_low_water_sends_very_low(self):
-        coordinator = _make_coordinator()
+    async def test_select_sends_only_the_clean_type(self, label, clean_type):
         entity = DysonRobotZoneCleanTypeSelect(
-            coordinator, MAP_ID, _zone("14", "Keuken")
+            _make_coordinator(), MAP_ID, _zone("13", "Gang")
         )
         entity.hass = MagicMock()
         entity.hass.services.async_call = AsyncMock()
@@ -103,79 +167,30 @@ class TestZoneCleanTypeSelectOption:
             "custom_components.hass_dyson.select._ha_device_id_for_serial",
             return_value="ha-device-id",
         ):
-            await entity.async_select_option("Stofzuigen + dweilen (zeer laag water)")
+            await entity.async_select_option(label)
         data = entity.hass.services.async_call.await_args.args[2]
-        assert data["clean_type"] == "vacuumAndMop"
-        assert data["water_level"] == "veryLow"
-
-    @pytest.mark.asyncio
-    async def test_select_vacuum_and_mop_passes_water_level(self):
-        coordinator = _make_coordinator()
-        zone = _zone("13", "Gang")
-        entity = DysonRobotZoneCleanTypeSelect(coordinator, MAP_ID, zone)
-        entity.hass = MagicMock()
-        entity.hass.services.async_call = AsyncMock()
-        entity.async_write_ha_state = MagicMock()
-
-        with patch(
-            "custom_components.hass_dyson.select._ha_device_id_for_serial",
-            return_value="ha-device-id",
-        ):
-            await entity.async_select_option("Stofzuigen + dweilen (hoog water)")
-
-        entity.hass.services.async_call.assert_awaited_once_with(
-            "hass_dyson",
-            "set_zone_behaviour",
-            {
-                "device_id": "ha-device-id",
-                "zone": "13",
-                "map": MAP_ID,
-                "clean_type": "vacuumAndMop",
-                "water_level": "high",
-            },
-            blocking=True,
-        )
-        assert entity._attr_current_option == "Stofzuigen + dweilen (hoog water)"
-
-    @pytest.mark.asyncio
-    async def test_select_vacuum_only_omits_water_level(self):
-        coordinator = _make_coordinator()
-        zone = _zone("13", "Gang")
-        entity = DysonRobotZoneCleanTypeSelect(coordinator, MAP_ID, zone)
-        entity.hass = MagicMock()
-        entity.hass.services.async_call = AsyncMock()
-        entity.async_write_ha_state = MagicMock()
-
-        with patch(
-            "custom_components.hass_dyson.select._ha_device_id_for_serial",
-            return_value="ha-device-id",
-        ):
-            await entity.async_select_option("Alleen stofzuigen")
-
-        call_data = entity.hass.services.async_call.await_args.args[2]
-        assert call_data["clean_type"] == "vacuum"
-        assert "water_level" not in call_data
+        assert data == {
+            "device_id": "ha-device-id",
+            "zone": "13",
+            "map": MAP_ID,
+            "clean_type": clean_type,
+        }
+        assert entity._attr_current_option == label
 
     @pytest.mark.asyncio
     async def test_service_failure_does_not_update_state(self):
-        coordinator = _make_coordinator()
-        # Starts as "Alleen stofzuigen" (vacuum/low); the failed call below
-        # attempts a different option, so a wrongly-optimistic update is
-        # distinguishable from "state left alone".
-        zone = _zone("13", "Gang", cleanType="vacuum", waterLevel="low")
-        entity = DysonRobotZoneCleanTypeSelect(coordinator, MAP_ID, zone)
-        assert entity._attr_current_option == "Alleen stofzuigen"
+        entity = DysonRobotZoneCleanTypeSelect(
+            _make_coordinator(), MAP_ID, _zone("13", "Gang")
+        )
         entity.hass = MagicMock()
         entity.hass.services.async_call = AsyncMock(side_effect=RuntimeError("boom"))
         entity.async_write_ha_state = MagicMock()
-
         with patch(
             "custom_components.hass_dyson.select._ha_device_id_for_serial",
             return_value="ha-device-id",
         ):
-            await entity.async_select_option("Stofzuigen + dweilen (hoog water)")
-
-        assert entity._attr_current_option == "Alleen stofzuigen"
+            await entity.async_select_option("Dweilen")
+        assert entity._attr_current_option == "Stofzuigen"
         entity.async_write_ha_state.assert_not_called()
 
 
@@ -243,7 +258,7 @@ class TestSetupZoneSettingsSelects:
         add_entities.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_discovers_four_selects_per_zone(self):
+    async def test_discovers_five_selects_per_zone(self):
         coordinator = _make_coordinator()
         add_entities = MagicMock()
         zones = [_zone("13", "Gang"), _zone("10", "Woonkamer")]
@@ -256,12 +271,13 @@ class TestSetupZoneSettingsSelects:
             )
         add_entities.assert_called_once()
         added = add_entities.call_args.args[0]
-        assert len(added) == 8  # 2 zones × 4 settings selects
+        assert len(added) == 10  # 2 zones × 5 settings selects
         assert sum(isinstance(e, DysonRobotZoneCleanTypeSelect) for e in added) == 2
         assert (
             sum(isinstance(e, DysonRobotZoneCleaningStrategySelect) for e in added) == 2
         )
         assert sum(isinstance(e, DysonRobotZoneMopPassesSelect) for e in added) == 2
+        assert sum(isinstance(e, DysonRobotZoneWaterLevelSelect) for e in added) == 2
 
 
 class TestZoneDiscoveryRetry:
@@ -290,7 +306,7 @@ class TestZoneDiscoveryRetry:
             await callback(None)
 
         assert fetch.await_count == 2
-        assert len(add_entities.call_args.args[0]) == 4
+        assert len(add_entities.call_args.args[0]) == 5
 
     @pytest.mark.asyncio
     async def test_retries_are_bounded(self):
@@ -393,33 +409,6 @@ class TestZoneUvScanSelect:
         )
 
 
-class TestMopOnlyCleanType:
-    """The app's "alleen dweilen" is cloud cleanType ``mop`` (seen 19 okt 2026)."""
-
-    def test_decodes_mop_with_water_level(self):
-        zone = _zone("14", "Keuken", cleanType="mop", waterLevel="low")
-        entity = DysonRobotZoneCleanTypeSelect(_make_coordinator(), MAP_ID, zone)
-        assert entity._attr_current_option == "Alleen dweilen (laag water)"
-        assert "Alleen dweilen (hoog water)" in entity._attr_options
-
-    @pytest.mark.asyncio
-    async def test_select_mop_sends_clean_type_and_water(self):
-        entity = DysonRobotZoneCleanTypeSelect(
-            _make_coordinator(), MAP_ID, _zone("14", "Keuken")
-        )
-        entity.hass = MagicMock()
-        entity.hass.services.async_call = AsyncMock()
-        entity.async_write_ha_state = MagicMock()
-        with patch(
-            "custom_components.hass_dyson.select._ha_device_id_for_serial",
-            return_value="ha-device-id",
-        ):
-            await entity.async_select_option("Alleen dweilen (gemiddeld water)")
-        data = entity.hass.services.async_call.await_args.args[2]
-        assert data["clean_type"] == "mop"
-        assert data["water_level"] == "medium"
-
-
 class TestZoneSelectRefreshTriggers:
     """App-side changes (no manifest broadcast) still refresh the selects."""
 
@@ -448,7 +437,7 @@ class TestZoneSelectRefreshTriggers:
                 hass, entry, coordinator, add_entities
             )
             clean_type = add_entities.call_args.args[0][0]
-            assert clean_type._attr_current_option == "Alleen stofzuigen"
+            assert clean_type._attr_current_option == "Stofzuigen"
 
             on_message = coordinator.device.add_message_callback.call_args.args[0]
             on_message("RB05/7VS/status/jdm", {"method": "event.clean_record.post"})
@@ -458,4 +447,4 @@ class TestZoneSelectRefreshTriggers:
             later.assert_called_once()
             await later.call_args.args[2](None)
 
-        assert clean_type._attr_current_option == "Alleen dweilen (laag water)"
+        assert clean_type._attr_current_option == "Dweilen"

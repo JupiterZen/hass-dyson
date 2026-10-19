@@ -5682,7 +5682,7 @@ def _cloud_zone_names_for(coordinator: DysonDataUpdateCoordinator) -> dict[str, 
 # on 5 okt 2026). The other positions are not understood and are passed
 # through raw. ``quick`` strategy was never observed, so unknown values are
 # shown as ``onbekend(<n>)`` instead of guessed.
-_PREF_CLEAN_TYPE = {0: "vacuum", 1: "vacuumAndMop", 2: "mop"}
+_PREF_CLEAN_TYPE = {0: "vacuum", 1: "vacuumAndMop", 2: "mop", 3: "vacuumThenMop"}
 _PREF_STRATEGY = {0: "auto", 1: "boost", 2: "quiet"}
 _PREF_WATER = {0: "low", 1: "medium", 2: "high", 99: "veryLow"}
 _PREF_REQUEST_INTERVAL = 300.0

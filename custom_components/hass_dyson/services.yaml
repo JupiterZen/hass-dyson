@@ -206,6 +206,7 @@ set_zone_behaviour:
             - vacuum
             - vacuumAndMop
             - mop
+            - vacuumThenMop
     water_level:
       name: Water Level
       description: Mop water level for this zone (only relevant with vacuumAndMop or mop).

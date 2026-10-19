@@ -42,25 +42,23 @@ _ZONE_SELECT_MANIFEST_REFRESH_DEBOUNCE: float = 5.0
 _ZONE_DISCOVERY_RETRY_DELAY: float = 120.0
 _ZONE_DISCOVERY_MAX_RETRIES: int = 15
 
-# clean_type × water_level, collapsed into one human-friendly axis — this
-# is also how the MyDyson app presents it (one picker, not two). The
-# "veryLow"/"low"/"medium"/"high" water levels and "vacuum"/"vacuumAndMop"
-# clean types are observed on the wire ("veryLow" = "zeer laag", from the app
-# on 6 okt 2026, the others from the 2026-09-30 captures). "mop" (the app's
-# "alleen dweilen", jdm cleanType 2) was captured on 19 okt 2026; its water
-# levels are assumed to be the same four as with vacuumAndMop.
-_ZONE_CLEAN_TYPE_OPTIONS: dict[str, tuple[str, str | None]] = {
-    "Alleen stofzuigen": ("vacuum", None),
-    "Stofzuigen + dweilen (zeer laag water)": ("vacuumAndMop", "veryLow"),
-    "Stofzuigen + dweilen (laag water)": ("vacuumAndMop", "low"),
-    "Stofzuigen + dweilen (gemiddeld water)": ("vacuumAndMop", "medium"),
-    "Stofzuigen + dweilen (hoog water)": ("vacuumAndMop", "high"),
-    "Alleen dweilen (zeer laag water)": ("mop", "veryLow"),
-    "Alleen dweilen (laag water)": ("mop", "low"),
-    "Alleen dweilen (gemiddeld water)": ("mop", "medium"),
-    "Alleen dweilen (hoog water)": ("mop", "high"),
+# The app's "reinigingstype" picker: four options, mapped to the cloud
+# ``cleanType``. "vacuumAndMop"/"vacuum" were seen in the 2026-09-30 captures,
+# "mop" and "vacuumThenMop" ("Stofzuigen, dan dweilen") from the app on
+# 19 okt 2026 (jdm cleanType 2 and 3). The water level is a separate picker.
+_ZONE_CLEAN_TYPE_OPTIONS: dict[str, str] = {
+    "Stofzuigen en dweilen": "vacuumAndMop",
+    "Stofzuigen": "vacuum",
+    "Dweilen": "mop",
+    "Stofzuigen, dan dweilen": "vacuumThenMop",
 }
-
+# "veryLow" = "zeer laag" came from the app on 6 okt 2026.
+_ZONE_WATER_LEVEL_OPTIONS: dict[str, str] = {
+    "zeer laag": "veryLow",
+    "laag": "low",
+    "gemiddeld": "medium",
+    "hoog": "high",
+}
 # The zone settings change in the MyDyson app without any manifest broadcast, so
 # besides that broadcast the selects also refresh when a jdm ``set_preference``
 # goes by (the app's own change) and on this slow timer as a safety net.
@@ -222,6 +220,7 @@ async def _async_setup_zone_settings_selects(
         str,
         tuple[
             DysonRobotZoneCleanTypeSelect,
+            DysonRobotZoneWaterLevelSelect,
             DysonRobotZoneCleaningStrategySelect,
             DysonRobotZoneMopPassesSelect,
             DysonRobotZoneUvScanSelect,
@@ -251,6 +250,9 @@ async def _async_setup_zone_settings_selects(
                 clean_type_select = DysonRobotZoneCleanTypeSelect(
                     coordinator, map_id, zone
                 )
+                water_level_select = DysonRobotZoneWaterLevelSelect(
+                    coordinator, map_id, zone
+                )
                 strategy_select = DysonRobotZoneCleaningStrategySelect(
                     coordinator, map_id, zone
                 )
@@ -265,6 +267,7 @@ async def _async_setup_zone_settings_selects(
                 continue
             known_selects[zone_id] = (
                 clean_type_select,
+                water_level_select,
                 strategy_select,
                 mop_passes_select,
                 uv_scan_select,
@@ -364,89 +367,6 @@ async def _async_setup_zone_settings_selects(
             _LOGGER.debug("Could not schedule periodic zone refresh", exc_info=True)
 
     await _async_discover()
-
-
-class DysonRobotZoneCleanTypeSelect(DysonEntity, SelectEntity):
-    """Per-zone "reinigingswijze" select (clean_type + water_level combined).
-
-    Cloud-backed setting — reads/writes
-    PUT /v2/app/{serial}/persistent-map-metadata/{mapId} via the
-    hass_dyson.set_zone_behaviour service (see services.py for the endpoint
-    details and the read-modify-write it performs). Deliberately not a
-    RestoreEntity: this is cloud truth, not local UI selection state like
-    switch.py's DysonRobotZoneTargetSwitch, so re-fetching on the next
-    manifest refresh is more correct than restoring a possibly-stale value
-    across a restart.
-    """
-
-    coordinator: DysonDataUpdateCoordinator
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(
-        self,
-        coordinator: DysonDataUpdateCoordinator,
-        map_id: str,
-        zone: dict,
-    ) -> None:
-        """Initialize the zone clean-type select."""
-        super().__init__(coordinator)
-        self._zone_id: str = zone["id"]
-        self._map_id = map_id
-        self._attr_unique_id = (
-            f"{coordinator.serial_number}_zone_clean_type_{map_id}_{self._zone_id}"
-        )
-        self._attr_options = list(_ZONE_CLEAN_TYPE_OPTIONS)
-        self._attr_icon = "mdi:spray-bottle"
-        self.async_update_zone(zone)
-
-    @callback
-    def async_update_zone(self, zone: dict) -> None:
-        """Refresh state from freshly-fetched zone settings."""
-        self.zone_name: str = str(zone.get("name") or f"Zone {self._zone_id}")
-        self._attr_name = f"{self.zone_name} reinigingswijze"
-        settings = zone.get("settings") or {}
-        clean_type = settings.get("cleanType")
-        water_level = settings.get("waterLevel")
-        self._attr_current_option = next(
-            (
-                label
-                for label, (ct, wl) in _ZONE_CLEAN_TYPE_OPTIONS.items()
-                if ct == clean_type and (ct == "vacuum" or wl == water_level)
-            ),
-            None,
-        )
-        if self.hass is not None and self.entity_id is not None:
-            self.async_write_ha_state()
-
-    async def async_select_option(self, option: str) -> None:
-        """Apply the chosen cleaning mode via the set_zone_behaviour service."""
-        clean_type, water_level = _ZONE_CLEAN_TYPE_OPTIONS[option]
-        service_data: dict[str, Any] = {
-            "device_id": _ha_device_id_for_serial(
-                self.hass, self.coordinator.serial_number
-            ),
-            "zone": self._zone_id,
-            "map": self._map_id,
-            "clean_type": clean_type,
-        }
-        if water_level is not None:
-            service_data["water_level"] = water_level
-        try:
-            await self.hass.services.async_call(
-                DOMAIN, "set_zone_behaviour", service_data, blocking=True
-            )
-        except Exception as err:
-            _LOGGER.error(
-                "Failed to set zone %s (%s) clean type to %r for %s: %s",
-                self._zone_id,
-                self.zone_name,
-                option,
-                mask_serial(self.coordinator.serial_number),
-                err,
-            )
-            return
-        self._attr_current_option = option
-        self.async_write_ha_state()
 
 
 class DysonRobotZoneCleaningStrategySelect(DysonEntity, SelectEntity):
@@ -2091,3 +2011,30 @@ class DysonRobotZoneUvScanSelect(DysonRobotZoneSettingSelect):
     _service_field = "uv_scan"
     _options_map = _ZONE_UV_SCAN_OPTIONS
     _attr_icon = "mdi:lightbulb-on-outline"
+
+
+class DysonRobotZoneCleanTypeSelect(DysonRobotZoneSettingSelect):
+    """Per-zone "reinigingstype" (``cleanType``), the app's four-way picker.
+
+    Stofzuigen en dweilen / Stofzuigen / Dweilen / Stofzuigen, dan dweilen.
+    The mop water level is the separate DysonRobotZoneWaterLevelSelect.
+    """
+
+    _unique_key = "zone_clean_type"
+    _name_suffix = "reinigingstype"
+    _settings_key = "cleanType"
+    _service_field = "clean_type"
+    _options_map = _ZONE_CLEAN_TYPE_OPTIONS
+    _attr_icon = "mdi:spray-bottle"
+
+
+class DysonRobotZoneWaterLevelSelect(DysonRobotZoneSettingSelect):
+    """Per-zone mop water level (``waterLevel``); only meaningful when the
+    cleaning type includes mopping."""
+
+    _unique_key = "zone_water_level"
+    _name_suffix = "waterniveau"
+    _settings_key = "waterLevel"
+    _service_field = "water_level"
+    _options_map = _ZONE_WATER_LEVEL_OPTIONS
+    _attr_icon = "mdi:water"
