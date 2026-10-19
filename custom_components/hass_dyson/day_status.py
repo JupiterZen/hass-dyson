@@ -17,6 +17,13 @@ Rules (agreed 8 okt 2026):
   rest of the day instead of being retried at every departure; the day change
   or a completed manual run clears it. Rooms the robot never reached
   (``CLEAN_PENDING``, e.g. someone came home early) are not attempts.
+* What a room needs depends on its cleaning type (19 okt 2026): ``vacuum`` needs
+  a completed vacuum pass, ``mop`` a completed mop pass, ``vacuumAndMop`` and
+  ``vacuumThenMop`` both. A complete run counts for the parts its own type
+  covers, so a vacuumed room that is switched to mopping becomes open again
+  and one that is switched back to vacuum-only is done again. Water level,
+  mop passes and strategy do not count (yet). A room whose wanted type is
+  unknown is judged as before: complete today = done.
 * ``CLEAN_COMPLETE`` is the robot's own verdict and it can be wrong: on 9 okt
   2026 it reported the Kinderkamer and the Slaapkamer complete after driving a
   few metres in through the door. A complete room therefore only counts when at
@@ -58,6 +65,24 @@ SWEEP_RADIUS_M = 0.15
 GRID_M = 0.05
 THIN = "TE_WEINIG_GEDEKT"
 _LIVE_MAX_AGE = timedelta(hours=6)
+
+
+VACUUM = "stofzuigen"
+MOP = "dweilen"
+_FULL = frozenset({VACUUM, MOP})
+
+
+def components(clean_type: str | None) -> frozenset[str]:
+    """The parts (vacuuming / mopping) a cleaning type covers.
+
+    Unknown or missing types count as both, which keeps old data and unseen
+    types behaving as before (a complete run = done).
+    """
+    if clean_type == "vacuum":
+        return frozenset({VACUUM})
+    if clean_type == "mop":
+        return frozenset({MOP})
+    return _FULL
 
 
 def day_of(moment: datetime) -> date:
@@ -109,10 +134,12 @@ def coverage_fraction(
 
 
 def _zone(state: dict[str, Any], name: str) -> dict[str, Any]:
-    return state["zones"].setdefault(
+    entry = state["zones"].setdefault(
         name,
         {
             "last_completed": None,
+            "last_vacuumed": None,
+            "last_mopped": None,
             "live_completed": None,
             "last_coverage": None,
             "last_status": None,
@@ -121,6 +148,11 @@ def _zone(state: dict[str, Any], name: str) -> dict[str, Any]:
             "attempts": 0,
         },
     )
+    # A state saved before vacuuming and mopping were tracked apart counted a
+    # complete room as both.
+    entry.setdefault("last_vacuumed", entry.get("last_completed"))
+    entry.setdefault("last_mopped", entry.get("last_completed"))
+    return entry
 
 
 def ingest_record(
@@ -129,6 +161,7 @@ def ingest_record(
     when: datetime,
     zones: list[dict[str, Any]],
     coverage: dict[str, float | None] | None = None,
+    run_components: dict[str, frozenset[str]] | None = None,
 ) -> bool:
     """Fold one finished clean into ``state``. Returns False if already seen.
 
@@ -136,7 +169,10 @@ def ingest_record(
     Records must be fed oldest first so ``last_status`` ends up being the
     newest one. ``coverage`` maps room name to the measured swept share of its
     floor; a ``CLEAN_COMPLETE`` room below ``MIN_COVERAGE`` is recorded as
-    ``THIN`` and does not count as completed.
+    ``THIN`` and does not count as completed. A complete room counts for the
+    parts of its own cleaning type (``zone["settings"]["cleanType"]``),
+    narrowed by ``run_components`` (what the wanted settings were when the run
+    started) when the record's own settings may lag behind a recent change.
     """
     if clean_id in state["processed"]:
         return False
@@ -169,6 +205,22 @@ def ingest_record(
             entry["last_attempt"] = stamp
             entry["last_status"] = status
             entry["last_coverage"] = cov
+        if status == COMPLETE:
+            settings = zone.get("settings")
+            record_type = (
+                settings.get("cleanType") if isinstance(settings, dict) else None
+            )
+            done = components(record_type)
+            if run_components and name in run_components:
+                done = done & run_components[name]
+            if VACUUM in done and (
+                entry.get("last_vacuumed") is None or stamp > entry["last_vacuumed"]
+            ):
+                entry["last_vacuumed"] = stamp
+            if MOP in done and (
+                entry.get("last_mopped") is None or stamp > entry["last_mopped"]
+            ):
+                entry["last_mopped"] = stamp
         if status == COMPLETE and (
             entry["last_completed"] is None or stamp > entry["last_completed"]
         ):
@@ -201,10 +253,26 @@ def _sort_key(name: str, entry: dict[str, Any] | None) -> tuple[Any, ...]:
     return (last_day, tie, name)
 
 
+def _stamp(entry: dict[str, Any], key: str) -> str | None:
+    """Timestamp for a part; states from before the split fall back to
+    ``last_completed`` (they counted as both parts)."""
+    if key in entry:
+        return entry[key]
+    return entry.get("last_completed")
+
+
 def evaluate(
-    state: dict[str, Any], now: datetime, zone_names: list[str]
+    state: dict[str, Any],
+    now: datetime,
+    zone_names: list[str],
+    wanted: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
-    """Today's status for ``zone_names`` (the rooms on the current map)."""
+    """Today's status for ``zone_names`` (the rooms on the current map).
+
+    ``wanted`` maps a room to its current cleaning type (``vacuum``, ``mop``,
+    ``vacuumAndMop``, ``vacuumThenMop``); rooms missing from it are judged on
+    "complete today" alone.
+    """
     today = day_of(now).isoformat()
     zones = state["zones"]
     rooms: dict[str, dict[str, Any]] = {}
@@ -212,7 +280,19 @@ def evaluate(
         entry = zones.get(name) or {}
         last = entry.get("last_completed")
         live = entry.get("live_completed")
-        done = bool(last) and day_of(datetime.fromisoformat(last)).isoformat() == today
+        done_today: set[str] = set()
+        for part, key in ((VACUUM, "last_vacuumed"), (MOP, "last_mopped")):
+            stamp = _stamp(entry, key)
+            if stamp and day_of(datetime.fromisoformat(stamp)).isoformat() == today:
+                done_today.add(part)
+        wanted_type = (wanted or {}).get(name)
+        needs = components(wanted_type) if wanted_type else None
+        if needs is None:
+            done = (
+                bool(last) and day_of(datetime.fromisoformat(last)).isoformat() == today
+            )
+        else:
+            done = needs <= done_today
         if not done and live:
             live_at = datetime.fromisoformat(live)
             done = (
@@ -225,6 +305,9 @@ def evaluate(
             "laatste_status": entry.get("last_status"),
             "dekking": entry.get("last_coverage"),
             "pogingen_vandaag": attempts,
+            "gewenst": wanted_type,
+            "gedaan_vandaag": sorted(done_today),
+            "ontbreekt": sorted(needs - done_today) if needs is not None else [],
         }
     for r in rooms.values():
         r["opgegeven"] = (
@@ -245,6 +328,11 @@ def evaluate(
         "klaar": done_rooms,
         "alles_klaar": bool(zone_names) and not open_rooms and not given_up,
         "opgegeven_vandaag": given_up,
+        "onvolledig_vandaag": [
+            n
+            for n, r in rooms.items()
+            if not r["klaar_vandaag"] and r["gedaan_vandaag"] and r["ontbreekt"]
+        ],
         "cant_clean_vandaag": [
             n
             for n, r in rooms.items()

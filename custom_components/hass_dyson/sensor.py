@@ -5486,16 +5486,81 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
         self._retries = 0
         self._last_ingest: str | None = None
         self._known_names: list[str] = []
+        # Wanted cleaning type per room when each run started (the cloud
+        # record's own settings can lag a change made seconds before the start).
+        self._run_snapshots: list[dict[str, Any]] = []
+        self._snapshot_taken = False
 
     @property
     def should_poll(self) -> bool:
         return True
+
+    def _wanted_types(self) -> dict[str, str]:
+        """Room -> cleaning type as currently set (the reinigingstype selects)."""
+        from homeassistant.helpers import entity_registry as er
+
+        from .select import _ZONE_CLEAN_TYPE_OPTIONS
+
+        if self.hass is None:
+            return {}
+        prefix = f"{self.coordinator.serial_number}_zone_clean_type_"
+        suffix = " reinigingstype"
+        wanted: dict[str, str] = {}
+        for entry in er.async_entries_for_config_entry(
+            er.async_get(self.hass), self.coordinator.config_entry.entry_id
+        ):
+            name = entry.original_name or ""
+            if (
+                entry.domain != "select"
+                or not (entry.unique_id or "").startswith(prefix)
+                or not name.endswith(suffix)
+            ):
+                continue
+            state = self.hass.states.get(entry.entity_id)
+            clean_type = _ZONE_CLEAN_TYPE_OPTIONS.get(state.state) if state else None
+            if clean_type:
+                wanted[name[: -len(suffix)]] = clean_type
+        return wanted
+
+    def _snapshot_run_start(self) -> None:
+        """Remember what each room was set to when a run begins."""
+        wanted = self._wanted_types()
+        if not wanted:
+            return
+        self._run_snapshots.append({"t": time.time(), "wanted": wanted})
+        del self._run_snapshots[:-10]
+
+    def _run_components(self, start_epoch: float | None) -> dict[str, frozenset[str]]:
+        """What each room was meant to get in the run that started at ``start_epoch``."""
+        if not isinstance(start_epoch, (int, float)):
+            return {}
+        near = [
+            snap
+            for snap in self._run_snapshots
+            if abs(float(snap.get("t", 0)) - start_epoch) <= 180
+        ]
+        if not near:
+            return {}
+        best = min(near, key=lambda snap: abs(float(snap["t"]) - start_epoch))
+        return {
+            room: day_status.components(clean_type)
+            for room, clean_type in best["wanted"].items()
+        }
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if not last or last.state in ("unknown", "unavailable"):
             return
+        snaps = last.attributes.get("run_snapshots")
+        if isinstance(snaps, list):
+            self._run_snapshots = [
+                snap
+                for snap in snaps
+                if isinstance(snap, dict)
+                and isinstance(snap.get("wanted"), dict)
+                and isinstance(snap.get("t"), (int, float))
+            ][-10:]
         zones = last.attributes.get("zones_state")
         processed = last.attributes.get("processed_ids")
         if (
@@ -5531,7 +5596,9 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
         return list(dict.fromkeys([*day_status.TIEBREAK, *self._state["zones"]]))
 
     def _publish(self) -> None:
-        result = day_status.evaluate(self._state, dt_util.now(), self._zone_names())
+        result = day_status.evaluate(
+            self._state, dt_util.now(), self._zone_names(), self._wanted_types()
+        )
         self._attr_native_value = len(result["klaar"])
         self._attr_extra_state_attributes = {
             "dag": result["dag"],
@@ -5541,12 +5608,14 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
             "cant_clean_vandaag": result["cant_clean_vandaag"],
             "te_weinig_gedekt_vandaag": result["te_weinig_gedekt_vandaag"],
             "opgegeven_vandaag": result["opgegeven_vandaag"],
+            "onvolledig_vandaag": result["onvolledig_vandaag"],
             "kamers": result["kamers"],
             "laatst_bijgewerkt": self._last_ingest,
             "bekende_kamers": self._known_names,
             "state_version": day_status.STATE_VERSION,
             "zones_state": self._state["zones"],
             "processed_ids": self._state["processed"],
+            "run_snapshots": self._run_snapshots,
         }
 
     async def _coverage(
@@ -5601,9 +5670,13 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
             # the live map): use those so the status is not blind meanwhile.
             self._pending = True
             self._retries = 0
+            if not self._snapshot_taken:
+                self._snapshot_taken = True
+                self._snapshot_run_start()
             self._mark_live_completions()
             self._publish()
             return
+        self._snapshot_taken = False
         now = time.monotonic()
         due = (
             self._last_try is None
@@ -5639,7 +5712,12 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
                 when = dt_util.as_local(dt_util.utc_from_timestamp(max(stamps)))
                 coverage = await self._coverage(data, zones)
                 if day_status.ingest_record(
-                    self._state, clean_id, when, zones, coverage
+                    self._state,
+                    clean_id,
+                    when,
+                    zones,
+                    coverage,
+                    self._run_components(getattr(rec, "start_time_epoch", None)),
                 ):
                     ingested += 1
             if ingested:

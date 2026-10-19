@@ -517,3 +517,233 @@ class TestGivingUp:
         assert result["opgegeven_vandaag"] == ["Slaapkamer"]
         assert "Kinderkamer" in result["klaar"]
         assert not result["alles_klaar"]
+
+
+def typed(cleanType: str, **statuses: str) -> list[dict]:
+    """Zone entries carrying the record's own cleanType setting."""
+    return [
+        {
+            "name": n.replace("_", " "),
+            "cleanStatus": s,
+            "settings": {"cleanType": cleanType},
+        }
+        for n, s in statuses.items()
+    ]
+
+
+class TestCleaningTypeComponents:
+    """A room is done when what it wants now has been done today (19 okt 2026)."""
+
+    def test_components_per_type(self):
+        assert ds.components("vacuum") == {ds.VACUUM}
+        assert ds.components("mop") == {ds.MOP}
+        assert ds.components("vacuumAndMop") == {ds.VACUUM, ds.MOP}
+        assert ds.components("vacuumThenMop") == {ds.VACUUM, ds.MOP}
+        assert ds.components(None) == {ds.VACUUM, ds.MOP}
+
+    def test_vacuumed_room_becomes_open_when_switched_to_mopping(self):
+        state = ds.new_state()
+        ds.ingest_record(state, "a", at(8, 9), typed("vacuum", Keuken=ds.COMPLETE))
+        wanted_vacuum = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "vacuum"})
+        assert wanted_vacuum["kamers"]["Keuken"]["klaar_vandaag"]
+        for wanted in ("mop", "vacuumAndMop", "vacuumThenMop"):
+            result = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": wanted})
+            room = result["kamers"]["Keuken"]
+            assert not room["klaar_vandaag"], wanted
+            assert "Keuken" in result["open"]
+            assert "Keuken" in result["onvolledig_vandaag"]
+            assert room["gedaan_vandaag"] == [ds.VACUUM]
+        # mop-only still needs only the mop part
+        mop = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "mop"})
+        assert mop["kamers"]["Keuken"]["ontbreekt"] == [ds.MOP]
+
+    def test_mopped_run_covers_vacuum_only_wish(self):
+        state = ds.new_state()
+        ds.ingest_record(
+            state, "a", at(8, 9), typed("vacuumAndMop", Keuken=ds.COMPLETE)
+        )
+        for wanted in ("vacuum", "mop", "vacuumAndMop"):
+            result = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": wanted})
+            assert result["kamers"]["Keuken"]["klaar_vandaag"], wanted
+
+    def test_vacuum_then_mop_runs_complete_both(self):
+        state = ds.new_state()
+        ds.ingest_record(
+            state, "a", at(8, 9), typed("vacuumThenMop", Keuken=ds.COMPLETE)
+        )
+        result = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "vacuumAndMop"})
+        assert result["kamers"]["Keuken"]["klaar_vandaag"]
+
+    def test_two_runs_add_up(self):
+        state = ds.new_state()
+        ds.ingest_record(state, "a", at(8, 7), typed("vacuum", Keuken=ds.COMPLETE))
+        ds.ingest_record(state, "b", at(8, 9), typed("mop", Keuken=ds.COMPLETE))
+        result = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "vacuumAndMop"})
+        assert result["kamers"]["Keuken"]["klaar_vandaag"]
+
+    def test_switching_back_to_vacuum_makes_it_done_again(self):
+        state = ds.new_state()
+        ds.ingest_record(state, "a", at(8, 9), typed("vacuum", Keuken=ds.COMPLETE))
+        assert not ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "mop"})["kamers"][
+            "Keuken"
+        ]["klaar_vandaag"]
+        assert ds.evaluate(state, at(8, 11), ROOMS, {"Keuken": "vacuum"})["kamers"][
+            "Keuken"
+        ]["klaar_vandaag"]
+
+    def test_yesterdays_mop_does_not_count_today(self):
+        state = ds.new_state()
+        ds.ingest_record(
+            state, "a", at(7, 9), typed("vacuumAndMop", Keuken=ds.COMPLETE)
+        )
+        ds.ingest_record(state, "b", at(8, 9), typed("vacuum", Keuken=ds.COMPLETE))
+        result = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "vacuumAndMop"})
+        assert not result["kamers"]["Keuken"]["klaar_vandaag"]
+
+    def test_run_snapshot_narrows_a_lagging_record(self):
+        """The record said vacuumAndMop 14 s after the user chose vacuum only."""
+        state = ds.new_state()
+        ds.ingest_record(
+            state,
+            "a",
+            at(8, 9),
+            typed("vacuumAndMop", Keuken=ds.COMPLETE),
+            run_components={"Keuken": ds.components("vacuum")},
+        )
+        result = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "mop"})
+        assert not result["kamers"]["Keuken"]["klaar_vandaag"]
+        assert result["kamers"]["Keuken"]["gedaan_vandaag"] == [ds.VACUUM]
+
+    def test_unknown_wish_keeps_old_behaviour(self):
+        state = ds.new_state()
+        ds.ingest_record(state, "a", at(8, 9), typed("vacuum", Keuken=ds.COMPLETE))
+        result = ds.evaluate(state, at(8, 10), ROOMS)
+        assert result["kamers"]["Keuken"]["klaar_vandaag"]
+        assert result["kamers"]["Keuken"]["gewenst"] is None
+
+    def test_state_saved_before_the_split_counts_as_both_parts(self):
+        state = {
+            "version": ds.STATE_VERSION,
+            "zones": {
+                "Keuken": {
+                    "last_completed": at(8, 9).isoformat(),
+                    "live_completed": None,
+                    "last_coverage": 0.9,
+                    "last_status": ds.COMPLETE,
+                    "last_attempt": at(8, 9).isoformat(),
+                    "attempt_day": "2026-10-08",
+                    "attempts": 1,
+                }
+            },
+            "processed": ["old"],
+        }
+        result = ds.evaluate(state, at(8, 10), ROOMS, {"Keuken": "vacuumAndMop"})
+        assert result["kamers"]["Keuken"]["klaar_vandaag"]
+        # a later vacuum-only run must not turn the legacy completion into a mop
+        ds.ingest_record(state, "n", at(9, 9), typed("vacuum", Keuken=ds.COMPLETE))
+        again = ds.evaluate(state, at(9, 10), ROOMS, {"Keuken": "vacuumAndMop"})
+        assert not again["kamers"]["Keuken"]["klaar_vandaag"]
+
+
+class TestWantedTypesAndRunSnapshots:
+    def test_wanted_types_read_from_the_type_selects(self):
+        sensor, coordinator = _sensor()
+        coordinator.config_entry.entry_id = "entry1"
+        make = lambda uid, name, eid: MagicMock(  # noqa: E731
+            domain="select", unique_id=uid, original_name=name, entity_id=eid
+        )
+        entries = [
+            make(
+                "7VS-EU-TST0001A_zone_clean_type_1_14",
+                "Keuken reinigingstype",
+                "select.k",
+            ),
+            make(
+                "7VS-EU-TST0001A_zone_clean_type_1_13",
+                "Gang reinigingstype",
+                "select.g",
+            ),
+            make(
+                "7VS-EU-TST0001A_zone_water_level_1_14",
+                "Keuken waterniveau",
+                "select.w",
+            ),
+        ]
+        states = {
+            "select.k": MagicMock(state="Dweilen"),
+            "select.g": MagicMock(state="unavailable"),
+            "select.w": MagicMock(state="laag"),
+        }
+        sensor.hass.states.get.side_effect = states.get
+        with (
+            patch(
+                "homeassistant.helpers.entity_registry.async_entries_for_config_entry",
+                return_value=entries,
+            ),
+            patch("homeassistant.helpers.entity_registry.async_get"),
+        ):
+            assert sensor._wanted_types() == {"Keuken": "mop"}
+
+    def test_snapshot_narrows_the_record_of_that_run(self):
+        sensor, _ = _sensor()
+        sensor._run_snapshots = [
+            {"t": 1_000.0, "wanted": {"Keuken": "vacuum", "Gang": "vacuumAndMop"}},
+            {"t": 9_000.0, "wanted": {"Keuken": "mop"}},
+        ]
+        assert sensor._run_components(1_020.0) == {
+            "Keuken": ds.components("vacuum"),
+            "Gang": ds.components("vacuumAndMop"),
+        }
+        assert sensor._run_components(5_000.0) == {}  # no snapshot near that start
+        assert sensor._run_components(None) == {}
+
+    @pytest.mark.asyncio
+    async def test_snapshot_is_taken_once_per_run(self):
+        sensor, _ = _sensor()
+        with (
+            patch.object(sensor, "_wanted_types", return_value={"Keuken": "vacuum"}),
+            patch.object(sensor, "_mark_live_completions"),
+            patch(
+                "custom_components.hass_dyson.sensor._is_cleaning", return_value=True
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor._cloud_zone_names_for",
+                return_value={},
+            ),
+        ):
+            await sensor.async_update()
+            await sensor.async_update()
+        assert len(sensor._run_snapshots) == 1
+        assert sensor._attr_extra_state_attributes["run_snapshots"]
+
+    @pytest.mark.asyncio
+    async def test_lagging_record_is_narrowed_by_the_snapshot(self):
+        sensor, _ = _sensor()
+        start = 1_791_470_000
+        sensor._run_snapshots = [{"t": start + 15.0, "wanted": {"Keuken": "vacuum"}}]
+        rec = MagicMock(
+            clean_id="r", start_time_epoch=start, end_time_epoch=start + 300
+        )
+        data = {"r": {"zones": typed("vacuumAndMop", Keuken=ds.COMPLETE)}}
+        with (
+            patch(
+                "custom_components.hass_dyson.sensor.fetch_clean_maps",
+                AsyncMock(return_value=[rec]),
+            ),
+            patch(
+                "custom_components.hass_dyson.image._fetch_v2_floor_plan_data",
+                AsyncMock(side_effect=lambda c, cid: data[cid]),
+            ),
+            patch(
+                "custom_components.hass_dyson.sensor._is_cleaning", return_value=False
+            ),
+            patch.object(sensor, "_wanted_types", return_value={"Keuken": "mop"}),
+            patch(
+                "custom_components.hass_dyson.sensor._cloud_zone_names_for",
+                return_value={},
+            ),
+        ):
+            await sensor.async_update()
+        zone = sensor._state["zones"]["Keuken"]
+        assert zone["last_vacuumed"] is not None
+        assert zone["last_mopped"] is None  # the lagging record said mop; it was not
