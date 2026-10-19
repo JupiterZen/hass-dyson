@@ -52,6 +52,7 @@ import math
 import zlib
 from datetime import datetime, timezone
 from functools import partial
+from typing import Any
 
 from homeassistant.components.image import ImageEntity
 from homeassistant.components.vacuum import VacuumActivity
@@ -943,13 +944,7 @@ def _render_v2_map_png(data: dict, rotation_deg: int = 0) -> bytes | None:
         # --- Robot path (blue semi-transparent line) ---
         clean_path = data.get("cleanPath") or []
         if clean_path and resolution > 0:
-            pts = [
-                _world_to_px(float(p.get("x") or 0), float(p.get("y") or 0))
-                for p in clean_path
-                if isinstance(p, dict)
-            ]
-            if len(pts) > 1:
-                draw.line(pts, fill=(30, 144, 255, 200), width=2)
+            _draw_clean_path(draw, clean_path, _world_to_px)
 
         # --- Dock location (solid green circle) ---
         dock = data.get("dockLocation")
@@ -1085,14 +1080,7 @@ def _render_v2_floor_plan_png(
         clean_path = data.get("cleanPath") or []
         has_path = False
         if clean_path and resolution > 0:
-            pts = [
-                _world_to_px(float(p.get("x") or 0), float(p.get("y") or 0))
-                for p in clean_path
-                if isinstance(p, dict)
-            ]
-            if len(pts) > 1:
-                draw.line(pts, fill=(30, 144, 255, 200), width=2)
-                has_path = True
+            has_path = _draw_clean_path(draw, clean_path, _world_to_px)
 
         # Dock location — green filled circle
         dock = data.get("dockLocation")
@@ -1274,6 +1262,44 @@ def _upright(dx: float, dy: float, rot: float) -> tuple[float, float]:
     """
     c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
     return dx * c + dy * s, -(-dx * s + dy * c)
+
+
+# Driven-route colours by the ``update`` bitmask of a ``cleanPath`` point:
+# 0 = driving only, 1 = vacuuming, 2 = mopping, 3 = both (width, RGBA).
+_PATH_STYLES: dict[int, tuple[int, tuple[int, int, int, int]]] = {
+    0: (1, (160, 160, 160, 110)),
+    1: (2, (30, 144, 255, 210)),
+    2: (3, (0, 200, 200, 230)),
+    3: (3, (0, 150, 140, 230)),
+}
+
+
+def _draw_clean_path(draw: Any, clean_path: list[Any], to_px: Any) -> bool:
+    """Draw the driven route, coloured per segment by its ``update`` bitmask.
+
+    Each segment takes the style of the point it leads to; consecutive
+    segments with the same style are drawn as one polyline. Returns True when
+    something was drawn.
+    """
+    points = [p for p in clean_path if isinstance(p, dict)]
+    if len(points) < 2:
+        return False
+    px = [to_px(float(p.get("x") or 0), float(p.get("y") or 0)) for p in points]
+    runs: list[tuple[int, list[Any]]] = []
+    for i in range(1, len(points)):
+        try:
+            kind = int(points[i].get("update") or 0) & 3
+        except (TypeError, ValueError):
+            kind = 0
+        if runs and runs[-1][0] == kind:
+            runs[-1][1].append(px[i])
+        else:
+            runs.append((kind, [px[i - 1], px[i]]))
+    # Thin driving lines first so the cleaning lines stay on top.
+    for kind, pts in sorted(runs, key=lambda r: r[0] != 0, reverse=False):
+        width, fill = _PATH_STYLES[kind]
+        draw.line(pts, fill=fill, width=width)
+    return True
 
 
 def _draw_dirt_icon(
@@ -1538,13 +1564,7 @@ def _render_live_map_png(
         # route) — see _render_v2_floor_plan_png's cleanPath handling for
         # the same field on the other endpoint.
         if clean_path:
-            pts = [
-                _world_to_px(float(p.get("x") or 0), float(p.get("y") or 0))
-                for p in clean_path
-                if isinstance(p, dict)
-            ]
-            if len(pts) > 1:
-                draw.line(pts, fill=(30, 144, 255, 200), width=2)
+            _draw_clean_path(draw, clean_path, _world_to_px)
 
         # Furniture silhouettes — light brown, no per-type styling (the
         # ``type`` field, e.g. "tvStand"/"doubleBed", is cosmetic only here).

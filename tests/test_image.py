@@ -3593,3 +3593,31 @@ class TestUserFurniture:
         assert [f["id"] for f in merged["furniture"]] == ["r", "2"]
         assert untouched is data
         assert len(data["furniture"]) == 1  # input not mutated
+
+
+class TestCleanPathColours:
+    def test_segments_are_coloured_by_update_bitmask(self):
+        img = Image.new("RGBA", (40, 10), (0, 0, 0, 0))
+        from PIL import ImageDraw
+
+        path = [
+            {"x": 0, "y": 5, "update": 0},
+            {"x": 10, "y": 5, "update": 1},
+            {"x": 20, "y": 5, "update": 2},
+            {"x": 30, "y": 5, "update": 3},
+        ]
+        assert image_module._draw_clean_path(
+            ImageDraw.Draw(img), path, lambda x, y: (int(x), int(y))
+        )
+        assert img.getpixel((5, 5))[:3] == (30, 144, 255)
+        assert img.getpixel((15, 5))[:3] == (0, 200, 200)
+        assert img.getpixel((25, 5))[:3] == (0, 150, 140)
+
+    def test_too_short_path_draws_nothing(self):
+        from PIL import ImageDraw
+
+        img = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        assert not image_module._draw_clean_path(
+            draw, [{"x": 1, "y": 1}], lambda x, y: (x, y)
+        )
