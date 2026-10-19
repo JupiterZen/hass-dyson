@@ -747,3 +747,41 @@ class TestWantedTypesAndRunSnapshots:
         zone = sensor._state["zones"]["Keuken"]
         assert zone["last_vacuumed"] is not None
         assert zone["last_mopped"] is None  # the lagging record said mop; it was not
+
+
+class TestMopOnlyCoverage:
+    FLOOR = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+
+    def test_points_near_the_room(self):
+        assert ds.has_points_near(self.FLOOR, [(1.0, 1.0)])
+        assert ds.has_points_near(self.FLOOR, [(2.1, 1.0)])  # within margin
+        assert not ds.has_points_near(self.FLOOR, [(5.0, 5.0)])
+        assert not ds.has_points_near([], [(1.0, 1.0)])
+        assert not ds.has_points_near(self.FLOOR, [])
+
+    @pytest.mark.asyncio
+    async def test_mop_only_room_is_not_judged_on_coverage(self):
+        sensor, _ = _sensor()
+        zone = {
+            "name": "Kinderkamer",
+            "cleanStatus": ds.COMPLETE,
+            "settings": {"cleanType": "mop"},
+            "visited": [{"x": x, "y": y} for x, y in self.FLOOR],
+        }
+        with_mop = {"cleanPath": [{"x": 1.0, "y": 1.0, "update": 2}]}
+        only_driving = {"cleanPath": [{"x": 1.0, "y": 1.0, "update": 0}]}
+        assert await sensor._coverage(with_mop, [zone]) == {"Kinderkamer": None}
+        assert await sensor._coverage(only_driving, [zone]) == {"Kinderkamer": 0.0}
+
+    @pytest.mark.asyncio
+    async def test_run_snapshot_narrows_a_lagging_record_type(self):
+        sensor, _ = _sensor()
+        zone = {
+            "name": "Keuken",
+            "cleanStatus": ds.COMPLETE,
+            "settings": {"cleanType": "vacuumAndMop"},
+            "visited": [{"x": x, "y": y} for x, y in self.FLOOR],
+        }
+        data = {"cleanPath": [{"x": 1.0, "y": 1.0, "update": 2}]}
+        out = await sensor._coverage(data, [zone], {"Keuken": frozenset({ds.MOP})})
+        assert out == {"Keuken": None}

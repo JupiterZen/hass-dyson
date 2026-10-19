@@ -133,6 +133,23 @@ def coverage_fraction(
     return both.histogram()[255] / floor_cells
 
 
+def has_points_near(
+    floor: list[tuple[float, float]],
+    points: list[tuple[float, float]],
+    margin: float = SWEEP_RADIUS_M,
+) -> bool:
+    """True when any of ``points`` lies in the bounding box of ``floor``."""
+    if not floor:
+        return False
+    xs = [p[0] for p in floor]
+    ys = [p[1] for p in floor]
+    return any(
+        min(xs) - margin <= x <= max(xs) + margin
+        and min(ys) - margin <= y <= max(ys) + margin
+        for x, y in points
+    )
+
+
 def _zone(state: dict[str, Any], name: str) -> dict[str, Any]:
     entry = state["zones"].setdefault(
         name,

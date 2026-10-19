@@ -5619,13 +5619,26 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
         }
 
     async def _coverage(
-        self, data: dict[str, Any], zones: list[dict[str, Any]]
+        self,
+        data: dict[str, Any],
+        zones: list[dict[str, Any]],
+        run_components: dict[str, frozenset[str]] | None = None,
     ) -> dict[str, float | None]:
-        """Swept share of each completed room's reachable floor (see day_status)."""
+        """Swept share of each completed room's reachable floor (see day_status).
+
+        A mop-only room is not judged on coverage: the robot mops hard floor
+        only, so a mostly carpeted room legitimately gets little. It counts
+        when the path carries mop points (``update`` bit 2) in that room,
+        otherwise it gets 0.0 (thin).
+        """
+        raw_path = [p for p in data.get("cleanPath") or [] if isinstance(p, dict)]
         path = [
+            (float(p["x"]), float(p["y"])) for p in raw_path if p.get("x") is not None
+        ]
+        mop_path = [
             (float(p["x"]), float(p["y"]))
-            for p in data.get("cleanPath") or []
-            if isinstance(p, dict) and p.get("x") is not None
+            for p in raw_path
+            if p.get("x") is not None and int(p.get("update") or 0) & 2
         ]
         result: dict[str, float | None] = {}
         for zone in zones:
@@ -5637,6 +5650,17 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
                 for p in zone.get("visited") or []
                 if isinstance(p, dict) and p.get("x") is not None
             ]
+            settings = zone.get("settings")
+            done = day_status.components(
+                settings.get("cleanType") if isinstance(settings, dict) else None
+            )
+            if run_components and name in run_components:
+                done = done & run_components[name]
+            if done == frozenset({day_status.MOP}):
+                result[name] = (
+                    None if day_status.has_points_near(floor, mop_path) else 0.0
+                )
+                continue
             result[name] = await self.hass.async_add_executor_job(
                 day_status.coverage_fraction, floor, path
             )
@@ -5710,14 +5734,12 @@ class DysonRobotDayStatusSensor(DysonEntity, RestoreEntity, SensorEntity):
                 if not stamps or not isinstance(zones, list):
                     continue
                 when = dt_util.as_local(dt_util.utc_from_timestamp(max(stamps)))
-                coverage = await self._coverage(data, zones)
+                run_components = self._run_components(
+                    getattr(rec, "start_time_epoch", None)
+                )
+                coverage = await self._coverage(data, zones, run_components)
                 if day_status.ingest_record(
-                    self._state,
-                    clean_id,
-                    when,
-                    zones,
-                    coverage,
-                    self._run_components(getattr(rec, "start_time_epoch", None)),
+                    self._state, clean_id, when, zones, coverage, run_components
                 ):
                     ingested += 1
             if ingested:
