@@ -5255,6 +5255,8 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
         # 10-minute-cached cloud history as fallback) is secondary/restore-only.
         self._tracked_task_begin_time: object = None
         self._last_reset_date: object = None
+        # Room the live map marks CLEAN_IN_PROGRESS (None when idle).
+        self._current_zone: str | None = None
         # 3 okt 2026: on 2 okt the live endpoint went away (404 once docked)
         # before the poll that saw the last zone finish, leaving the tally on
         # 5 of 6. These drive a final history lookup after cleaning stops.
@@ -5312,12 +5314,16 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
             "zone_names": sorted(self._completed_zone_names),
             "clean_id": self._tracked_clean_id,
             "last_reset_date": self._last_reset_date,
+            "current_zone": self._current_zone,
         }
 
     async def async_update(self) -> None:
         today = self._today_str()
 
         if not _is_cleaning(self.coordinator):
+            if self._current_zone is not None:
+                self._current_zone = None
+                self._publish_state()
             if self._finalize_pending:
                 await self._async_finalize_from_history()
             # Not mid-clean: a new calendar day (Europe/Amsterdam via HA's
@@ -5366,6 +5372,16 @@ class DysonRobotResumeSimulationSensor(DysonEntity, RestoreEntity, SensorEntity)
             return
 
         all_resolved = self._absorb_zones(zones)
+        self._current_zone = next(
+            (
+                z["name"]
+                for z in zones
+                if isinstance(z, dict)
+                and z.get("cleanStatus") == "CLEAN_IN_PROGRESS"
+                and isinstance(z.get("name"), str)
+            ),
+            None,
+        )
 
         # A clean that resolved every selected zone (all CLEAN_COMPLETE or
         # CANT_CLEAN, none still pending/in-progress) counts as a proper,

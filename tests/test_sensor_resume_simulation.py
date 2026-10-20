@@ -614,3 +614,44 @@ class TestPartialSelectionResets:
         sensor._last_reset_date = sensor._today_str()
         await sensor.async_update()
         assert sensor._completed_zone_names == {"Keuken"}
+
+
+class TestCurrentZone:
+    @pytest.mark.asyncio
+    async def test_current_zone_is_the_room_in_progress(self, mock_robot_coordinator):
+        sensor = _sensor_with_hass(mock_robot_coordinator)
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(
+                zones=[
+                    _zone("Living Room", "CLEAN_COMPLETE"),
+                    _zone("Bedroom", "CLEAN_IN_PROGRESS"),
+                    _zone("Kitchen", "CLEAN_PENDING"),
+                ]
+            )
+        )
+
+        await sensor.async_update()
+
+        assert sensor._attr_extra_state_attributes["current_zone"] == "Bedroom"
+
+    @pytest.mark.asyncio
+    async def test_no_room_in_progress_gives_none(self, mock_robot_coordinator):
+        sensor = _sensor_with_hass(mock_robot_coordinator)
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(zones=[_zone("Kitchen", "CLEAN_PENDING")])
+        )
+
+        await sensor.async_update()
+
+        assert sensor._attr_extra_state_attributes["current_zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_cleared_once_the_robot_stops(self, mock_robot_coordinator):
+        mock_robot_coordinator.device.robot_state = "INACTIVE_CHARGED"
+        sensor = _sensor_with_hass(mock_robot_coordinator)
+        sensor._current_zone = "Bedroom"
+        sensor._last_reset_date = sensor._today_str()
+
+        await sensor.async_update()
+
+        assert sensor._attr_extra_state_attributes["current_zone"] is None
