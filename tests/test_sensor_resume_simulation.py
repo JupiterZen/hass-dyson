@@ -655,3 +655,21 @@ class TestCurrentZone:
         await sensor.async_update()
 
         assert sensor._attr_extra_state_attributes["current_zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_requested_zones_exclude_not_requested(self, mock_robot_coordinator):
+        sensor = _sensor_with_hass(mock_robot_coordinator)
+        mock_robot_coordinator.async_cloud_client = _client_returning(
+            _live_map(
+                zones=[
+                    _zone("Living Room", "CLEAN_COMPLETE"),
+                    _zone("Bedroom", "CLEAN_IN_PROGRESS"),
+                    _zone("Kitchen", "CLEAN_NOT_REQUESTED"),
+                ]
+            )
+        )
+
+        await sensor.async_update()
+
+        attrs = sensor._attr_extra_state_attributes
+        assert attrs["requested_zone_names"] == ["Living Room", "Bedroom"]
