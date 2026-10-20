@@ -22,11 +22,11 @@
       "macaddress": "C8FF77*"
     }
   ],
-  "documentation": "https://github.com/cmgrayb/hass-dyson",
+  "documentation": "https://github.com/JupiterZen/hass-dyson",
   "homekit": {},
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/cmgrayb/hass-dyson/issues",
+  "issue_tracker": "https://github.com/JupiterZen/hass-dyson/issues",
   "loggers": [
     "custom_components.hass_dyson"
   ],
@@ -35,5 +35,5 @@
     "libdyson-rest==0.16.1",
     "paho-mqtt>=2.1.0"
   ],
-  "version": "0.38.0"
+  "version": "0.38.0-jz.1"
 }

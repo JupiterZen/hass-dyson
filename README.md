@@ -1,5 +1,7 @@
 # Dyson Integration for Home Assistant
 
+> **This is the [JupiterZen fork](https://github.com/JupiterZen/hass-dyson) of [cmgrayb/hass-dyson](https://github.com/cmgrayb/hass-dyson).** It adds a lot of Spot+Scrub (RB05) robot features on top of upstream: per-room cleaning settings, dock actions, day status and more. It is experimental and was developed against one robot. See **[docs/FORK.md](docs/FORK.md)** for what is added, how to install it through HACS and what to expect.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/cmgrayb/hass-dyson/main/custom_components/hass_dyson/brand/logo.png" alt="Dyson Logo" width="400"/>
 </p>

@@ -1,5 +1,5 @@
 {
-  "name": "Dyson",
+  "name": "Dyson (JupiterZen fork)",
   "hacs": "0.24.0",
   "zip_release": true,
   "filename": "hass_dyson.zip",
