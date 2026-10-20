@@ -20,8 +20,8 @@ based on, plus the fork's own counter.
 
 The fork uses the same domain (`hass_dyson`) as upstream, so **you can only have one of them
 installed**. Remove the upstream copy first. Existing config entries carry over; fork-only
-entities appear next to the ones you already have. Going back to upstream later works the
-same way; the fork-only entities then become unavailable.
+entities appear next to the ones you already have. Going back to upstream should work the
+same way, with the fork-only entities becoming unavailable, but that has not been tried.
 
 ## What the fork adds
 
@@ -33,9 +33,10 @@ see the merge commit message for the decisions.
   mop), water level, strategy (auto/quick/quiet/boost), mop passes and UV scan, as `select`
   entities. These are written to the same place the MyDyson app uses.
 - **Room selection**: a target switch per room and a *Start selected zones* button;
-  `hass_dyson.start_zone_clean` and `hass_dyson.set_zone_behaviour` services.
+  the `hass_dyson.start_zone_clean` service (with an `app_compatible` option) and a
+  repaired `hass_dyson.set_zone_behaviour`.
 - **Dock actions**: stop/delay, empty bin, wash and dry, dry the mop
-  (`hass_dyson.start_dock_action` / `abort_dock_action`, plus buttons).
+  (`hass_dyson.start_dock_action` / `abort_dock_action` services, plus buttons).
 - **Robot settings**: child lock, alarm, do-not-disturb, voice notifications, voice
   language, volume, wash-mop-before-clean, hot-water mop, detergent, collect-dust,
   self-clean interval and air-dry settings.
